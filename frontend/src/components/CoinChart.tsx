@@ -127,7 +127,6 @@ export function CoinChart({
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
-    container.innerHTML = "";
     const chartHeight = size === "large" ? 404 : 138;
     const hasKdjPane = showIndicators && indicatorMode === "kdj";
     const chart = createChart(container, {
