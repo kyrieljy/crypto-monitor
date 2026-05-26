@@ -6,11 +6,12 @@ interface PanelProps {
   action?: ReactNode;
   children: ReactNode;
   dragHandle?: boolean;
+  className?: string;
 }
 
-export function Panel({ title, action, children, dragHandle = true }: PanelProps) {
+export function Panel({ title, action, children, dragHandle = true, className }: PanelProps) {
   return (
-    <section className="panel">
+    <section className={["panel", className].filter(Boolean).join(" ")}>
       <div className="panel__head">
         <div className="panel__title">
           {dragHandle && <GripVertical className="drag-handle" size={16} />}

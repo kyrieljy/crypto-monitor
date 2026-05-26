@@ -54,6 +54,69 @@ def _source_label(source_role: Any, source: Any) -> str:
     return f"{label} ({source or '--'})"
 
 
+def _format_money(value: Any, digits: int = 2) -> str:
+    try:
+        return f"${float(value):,.{digits}f}"
+    except Exception:  # noqa: BLE001
+        return "--"
+
+
+def _format_amount(value: Any) -> str:
+    try:
+        number = float(value)
+        return f"{number:,.4f}".rstrip("0").rstrip(".")
+    except Exception:  # noqa: BLE001
+        return "--"
+
+
+def _mask_address(value: Any) -> str:
+    text = str(value or "")
+    if len(text) >= 12 and text.startswith("0x"):
+        return f"{text[:6]}...{text[-4:]}"
+    return text or "--"
+
+
+def _whale_direction_label(fill: dict[str, Any], payload: dict[str, Any]) -> str:
+    label = str(payload.get("direction_label") or fill.get("direction_label") or "").strip()
+    if label:
+        return label
+    direction = str(fill.get("direction") or "").strip()
+    normalized = direction.lower().replace("_", " ")
+    if "open long" in normalized:
+        return "买入开多"
+    if "close long" in normalized:
+        return "卖出平多"
+    if "open short" in normalized:
+        return "卖出开空"
+    if "close short" in normalized:
+        return "买入平空"
+    return direction or str(fill.get("side") or "--")
+
+
+def _whale_price_label(fill: dict[str, Any], payload: dict[str, Any]) -> str:
+    label = str(payload.get("price_label") or fill.get("price_label") or "").strip()
+    if label:
+        return label
+    normalized = str(fill.get("direction") or "").strip().lower().replace("_", " ")
+    if "close" in normalized:
+        return "平仓价格"
+    if "open" in normalized:
+        return "开仓价格"
+    return "成交价格"
+
+
+def _format_leverage(value: Any, margin_mode: Any = None) -> str:
+    if value in (None, ""):
+        return "--"
+    try:
+        number = float(value)
+        leverage = f"{number:g}x"
+    except Exception:  # noqa: BLE001
+        leverage = str(value)
+    mode = str(margin_mode or "").strip()
+    return f"{leverage} {mode}".strip()
+
+
 def _detail(row: Any) -> dict[str, Any]:
     raw = row["detail_json"] if row["detail_json"] else "{}"
     try:
@@ -185,6 +248,33 @@ def format_news_notification(row: Any) -> tuple[str, str]:
     return strategy_id, message
 
 
+def format_whale_notification(row: Any) -> str:
+    payload = json.loads(row["payload_json"] or "{}")
+    fill = payload.get("fill") if isinstance(payload.get("fill"), dict) else {}
+    label = str(payload.get("target_label") or row["target_label"] or row["target_id"])
+    coin = str(fill.get("coin") or "--")
+    price_label = _whale_price_label(fill, payload)
+    fee = fill.get("fee")
+    fee_token = str(fill.get("fee_token") or "USDC")
+    closed_pnl = fill.get("closed_pnl")
+    lines = [
+        "[Hyperliquid成交提醒]",
+        f"对象: {label}",
+        f"币种: {coin}",
+        f"仓位动作: {_whale_direction_label(fill, payload)}",
+        f"数量: {_format_amount(fill.get('size'))} {coin}",
+        f"{price_label}: {_format_money(fill.get('price'))}",
+        f"杠杆: {_format_leverage(payload.get('position_leverage'), payload.get('position_margin_mode'))}",
+        f"成交额: {_format_money(fill.get('notional'), 0)}",
+    ]
+    if fee not in (None, ""):
+        lines.append(f"手续费: {_format_amount(fee)} {fee_token}")
+    if closed_pnl not in (None, ""):
+        lines.append(f"已实现盈亏: {_format_money(closed_pnl)}")
+    lines.append(f"时间: {_format_cst(row['occurred_at_utc'])}")
+    return "\n".join(lines)
+
+
 class NotificationWorker:
     def __init__(self, store: Store, notification_service: NotificationService) -> None:
         self.store = store
@@ -219,3 +309,13 @@ class NotificationWorker:
             except Exception as exc:  # noqa: BLE001
                 self.store.mark_news_notification(int(row["id"]), ok=False, error=str(exc))
                 LOGGER.exception("新闻通知失败 id=%s", row["id"])
+
+        for row in self.store.list_pending_whale_notifications():
+            try:
+                message = format_whale_notification(row)
+                ok, dry_run, result_message = self.notification_service.send_strategy_message("whale", message)
+                self.store.mark_whale_notification(int(row["id"]), ok=ok, error=None if ok else result_message)
+                LOGGER.info("巨鲸通知处理 id=%s ok=%s dry_run=%s", row["id"], ok, dry_run)
+            except Exception as exc:  # noqa: BLE001
+                self.store.mark_whale_notification(int(row["id"]), ok=False, error=str(exc))
+                LOGGER.exception("巨鲸通知失败 id=%s", row["id"])

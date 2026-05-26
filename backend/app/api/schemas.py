@@ -157,8 +157,45 @@ class WhaleTargetOut(BaseModel):
     updated_at: str
 
 
+class WhaleTargetUpsert(BaseModel):
+    id: str | None = None
+    label: str
+    address_or_subject: str
+    enabled: bool = True
+    config: dict[str, Any] = Field(default_factory=dict)
+
+
+class WhaleAddressResolveRequest(BaseModel):
+    query: str
+
+
+class WhaleAddressCandidate(BaseModel):
+    address: str
+    label: str
+    source: str
+    chain: str = "evm"
+    url: str | None = None
+    confidence: float = 0.8
+    target_id: str | None = None
+
+
+class WhaleAddressResolveResponse(BaseModel):
+    query: str
+    candidates: list[WhaleAddressCandidate]
+
+
 class WhaleDetailOut(BaseModel):
     target: WhaleTargetOut
     recent_events: list[dict[str, Any]]
     positions: list[dict[str, Any]]
     holdings: list[dict[str, Any]]
+    defi_positions: list[dict[str, Any]] = Field(default_factory=list)
+    open_orders: list[dict[str, Any]] = Field(default_factory=list)
+    fills: list[dict[str, Any]] = Field(default_factory=list)
+    historical_orders: list[dict[str, Any]] = Field(default_factory=list)
+    funding: list[dict[str, Any]] = Field(default_factory=list)
+    ledger_updates: list[dict[str, Any]] = Field(default_factory=list)
+    portfolio: list[dict[str, Any]] = Field(default_factory=list)
+    account_summary: dict[str, Any] = Field(default_factory=dict)
+    snapshot: dict[str, Any] = Field(default_factory=dict)
+    updated_at: str | None = None

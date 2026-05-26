@@ -10,7 +10,9 @@ import type {
   SourceHealth,
   StrategyConfig,
   WhaleDetail,
+  WhaleAddressResolveResponse,
   WhaleTarget,
+  WhaleTargetUpsert,
   SymbolItem
 } from "../types/api";
 
@@ -60,6 +62,9 @@ export const api = {
   translateNews: (ids: number[]) => request<NewsTranslateResult>("/api/events/news/translate", { method: "POST", body: JSON.stringify({ ids }) }),
   health: () => request<SourceHealth[]>("/api/health/sources"),
   whales: () => request<WhaleTarget[]>("/api/whales"),
+  resolveWhaleAddress: (query: string) => request<WhaleAddressResolveResponse>("/api/whales/resolve", { method: "POST", body: JSON.stringify({ query }) }),
+  saveWhaleTarget: (target: WhaleTargetUpsert) => request<WhaleTarget>("/api/whales", { method: "PUT", body: JSON.stringify(target) }),
+  deleteWhaleTarget: (id: string) => request<{ ok: boolean }>(`/api/whales/${id}`, { method: "DELETE" }),
   whaleDetail: (id: string) => request<WhaleDetail>(`/api/whales/${id}`),
-  klines: (symbol: string, interval = "15m") => request<Kline[]>(`/api/market/klines/${symbol}/${interval}?limit=90`)
+  klines: (symbol: string, interval = "15m", limit = 90) => request<Kline[]>(`/api/market/klines/${symbol}/${interval}?limit=${limit}`)
 };

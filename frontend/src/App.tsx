@@ -42,6 +42,8 @@ import type {
   SourceHealth,
   StrategyConfig,
   ThemeMode,
+  WhaleAddressCandidate,
+  WhaleTargetUpsert,
   WhaleTarget
 } from "./types/api";
 
@@ -70,6 +72,17 @@ const DATA_SOURCE_OPTIONS = [
   { value: "binance_then_okx", label: "币安 Futures 优先，OKX 备用" },
   { value: "binance_only", label: "币安 Futures" }
 ];
+const WHALE_TAG_OPTIONS = ["聪明钱", "巨鲸", "KOL", "机构", "做市商", "交易员", "重点关注"];
+const STRATEGY_GROUPS = [
+  { title: "技术策略", ids: ["boll", "kdj", "ma"] },
+  { title: "巨鲸", ids: ["whale"], whaleTargets: true },
+  { title: "社媒和新闻", ids: ["trump_social", "whitehouse"] },
+  { title: "翻译和清理", ids: ["translation", "cleanup"] }
+];
+const THEME_STORAGE_KEY = "cryptoMonitorTheme";
+const DASHBOARD_LAYOUT_STORAGE_KEY = "cryptoMonitorDashboardLayout";
+const INDICATOR_MODE_STORAGE_KEY = "cryptoMonitorIndicatorMode";
+type IndicatorMode = "ma" | "boll" | "kdj";
 
 type DashboardControls = {
   chartInterval: string;
@@ -84,25 +97,67 @@ type DashboardControls = {
   chartFetching: boolean;
   activeChartSources: Record<string, { source: string; source_role: string }>;
   setActiveChartSource: (symbol: string, value: { source: string; source_role: string } | null) => void;
+  indicatorMode: IndicatorMode;
+  setIndicatorMode: (mode: IndicatorMode) => void;
   translateNews: (ids: number[]) => void;
   newsTranslating: boolean;
   canTranslateNews: boolean;
 };
 
+type IndicatorSettings = {
+  maShortPeriod: number;
+  maFastPeriod: number;
+  maSlowPeriod: number;
+  bollPeriod: number;
+  bollStddev: number;
+  kdjPeriod: number;
+  kdjKSmoothing: number;
+  kdjDSmoothing: number;
+};
+
+function readThemePreference(): ThemeMode {
+  return localStorage.getItem(THEME_STORAGE_KEY) === "light" ? "light" : "dark";
+}
+
+function readDashboardLayoutPreference(): Array<{ i: string; x: number; y: number; w: number; h: number }> {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(DASHBOARD_LAYOUT_STORAGE_KEY) || "[]");
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter((item) => item && typeof item.i === "string")
+      .map((item) => ({
+        i: item.i,
+        x: Number(item.x) || 0,
+        y: Number(item.y) || 0,
+        w: Number(item.w) || 1,
+        h: Number(item.h) || 1
+      }));
+  } catch {
+    return [];
+  }
+}
+
+function readIndicatorModePreference(): IndicatorMode {
+  const mode = localStorage.getItem(INDICATOR_MODE_STORAGE_KEY);
+  if (mode === "boll" || mode === "kdj" || mode === "ma") return mode;
+  return "ma";
+}
+
 function App() {
   const queryClient = useQueryClient();
   const [view, setView] = useState<ViewMode>("dashboard");
-  const [theme, setTheme] = useState<ThemeMode>("dark");
+  const [theme, setThemeState] = useState<ThemeMode>(() => readThemePreference());
+  const [localLayout, setLocalLayout] = useState<Array<{ i: string; x: number; y: number; w: number; h: number }>>(() => readDashboardLayoutPreference());
   const [selectedWhaleId, setSelectedWhaleId] = useState<string | null>(null);
   const dashboardScrollBeforeWhaleRef = useRef<number | null>(null);
   const snapshotQuery = useQuery({ queryKey: ["snapshot"], queryFn: api.snapshot, refetchInterval: 30_000 });
   const { data, isLoading, isError } = snapshotQuery;
   const anyFetching = useIsFetching() > 0;
-  const saveLayout = useMutation({ mutationFn: api.saveLayout, onSuccess: () => queryClient.invalidateQueries({ queryKey: ["snapshot"] }) });
 
-  useEffect(() => {
-    if (data?.layout.theme) setTheme(data.layout.theme);
-  }, [data?.layout.theme]);
+  const setTheme = (nextTheme: ThemeMode) => {
+    setThemeState(nextTheme);
+    localStorage.setItem(THEME_STORAGE_KEY, nextTheme);
+  };
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -149,14 +204,19 @@ function App() {
 
   const visibleLayout = useMemo(() => {
     const modules = new Map((data?.modules ?? []).map((item) => [item.id, item]));
+    const localById = new Map(localLayout.map((item) => [item.i, item]));
     return (data?.layout.layout ?? [])
+      .map((item) => {
+        const local = localById.get(item.i);
+        return local ? { ...item, x: local.x, y: local.y, w: local.w, h: local.h } : item;
+      })
       .filter((item) => modules.get(item.i)?.enabled && modules.get(item.i)?.visible)
       .map((item) => (
         FIXED_DASHBOARD_MODULES.has(item.i)
           ? { ...item, static: true, isDraggable: false, isResizable: false }
           : item
       ));
-  }, [data]);
+  }, [data, localLayout]);
 
   return (
     <Shell
@@ -172,10 +232,7 @@ function App() {
         void queryClient.invalidateQueries({ queryKey: ["klines"] });
         void queryClient.invalidateQueries({ queryKey: ["whales"] });
       }}
-      setTheme={(nextTheme) => {
-        setTheme(nextTheme);
-        if (data) saveLayout.mutate({ ...data.layout, theme: nextTheme });
-      }}
+      setTheme={setTheme}
     >
       {isLoading && <div className="boot">正在加载监控系统…</div>}
       {(isError || !data) && !isLoading && <div className="boot">后端暂不可用，请确认服务已启动。</div>}
@@ -188,11 +245,9 @@ function App() {
           snapshotFetching={snapshotQuery.isFetching}
           refreshSnapshot={() => { void snapshotQuery.refetch(); }}
           onLayoutChange={(layout) => {
-            saveLayout.mutate({
-              ...data.layout,
-              theme,
-              layout: layout.map(({ i, x, y, w, h }) => ({ i, x, y, w, h }))
-            });
+            const nextLayout = layout.map(({ i, x, y, w, h }) => ({ i, x, y, w, h }));
+            setLocalLayout(nextLayout);
+            localStorage.setItem(DASHBOARD_LAYOUT_STORAGE_KEY, JSON.stringify(nextLayout));
           }}
         />
       )}
@@ -318,6 +373,10 @@ function Dashboard({
     localStorage.setItem("dashboardStrategyIntervals", JSON.stringify(strategyIntervals));
   }, [strategyIntervals]);
   const [activeChartSources, setActiveChartSources] = useState<Record<string, { source: string; source_role: string }>>({});
+  const [indicatorMode, setIndicatorMode] = useState<IndicatorMode>(() => readIndicatorModePreference());
+  useEffect(() => {
+    localStorage.setItem(INDICATOR_MODE_STORAGE_KEY, indicatorMode);
+  }, [indicatorMode]);
   const controls: DashboardControls = {
     chartInterval,
     setChartInterval,
@@ -340,6 +399,8 @@ function Dashboard({
         return { ...current, [symbol]: value };
       });
     },
+    indicatorMode,
+    setIndicatorMode,
     translateNews: (ids) => translateNews.mutate(ids),
     newsTranslating: translateNews.isPending,
     canTranslateNews
@@ -374,6 +435,10 @@ function renderModule(id: string, module: DashboardModule | undefined, data: Sna
   const title = module?.title ?? id;
   if (id === "charts") {
     const dataSource = String(module?.config?.data_source ?? "okx_then_binance");
+    const enabledSymbols = data.symbols.filter((item) => item.enabled).slice(0, 5);
+    const ethSymbol = enabledSymbols.find((item) => item.symbol === "ETHUSDT") ?? enabledSymbols[0];
+    const secondarySymbols = enabledSymbols.filter((item) => item.symbol !== ethSymbol?.symbol).slice(0, 4);
+    const indicatorSettings = indicatorSettingsFromStrategies(data.strategies);
     return (
       <Panel
         title={title}
@@ -400,17 +465,41 @@ function renderModule(id: string, module: DashboardModule | undefined, data: Sna
             <StrategyIntervalControl label="BOLL" value={controls.strategyIntervals.boll ?? "15m"} onChange={(value) => controls.setStrategyInterval("boll", value)} />
           </div>
         </div>
-        <div className="coin-wall">
-          {data.symbols.filter((item) => item.enabled).slice(0, 5).map((item) => (
-            <CoinStrategyCard
-              key={item.symbol}
-              symbol={item.symbol}
-              alerts={data.alerts.filter((alert) => alert.symbol === item.symbol)}
-              chartInterval={controls.chartInterval}
-              strategyIntervals={controls.strategyIntervals}
-              onChartSourceChange={(value) => controls.setActiveChartSource(item.symbol, value)}
-            />
-          ))}
+        <div className="market-monitor-layout">
+          {ethSymbol && (
+            <section className="eth-feature">
+              <div className="eth-feature__chart">
+                <CoinChart
+                  symbol={ethSymbol.symbol}
+                  interval={controls.chartInterval}
+                  size="large"
+                  showIndicators
+                  indicatorSettings={indicatorSettings}
+                  indicatorMode={controls.indicatorMode}
+                  onIndicatorModeChange={controls.setIndicatorMode}
+                  onSourceChange={(value) => controls.setActiveChartSource(ethSymbol.symbol, value)}
+                />
+              </div>
+              <CoinAlertStack
+                className="eth-alert-stack"
+                alerts={data.alerts.filter((alert) => alert.symbol === ethSymbol.symbol)}
+                strategyIntervals={controls.strategyIntervals}
+                collapsedHeight={138}
+              />
+            </section>
+          )}
+          <div className="coin-wall coin-wall--secondary">
+            {secondarySymbols.map((item) => (
+              <CoinStrategyCard
+                key={item.symbol}
+                symbol={item.symbol}
+                alerts={data.alerts.filter((alert) => alert.symbol === item.symbol)}
+                chartInterval={controls.chartInterval}
+                strategyIntervals={controls.strategyIntervals}
+                onChartSourceChange={(value) => controls.setActiveChartSource(item.symbol, value)}
+              />
+            ))}
+          </div>
         </div>
       </Panel>
     );
@@ -603,6 +692,32 @@ function latestQueryUpdatedAt(queryClient: ReturnType<typeof useQueryClient>, qu
   );
 }
 
+function indicatorSettingsFromStrategies(strategies: StrategyConfig[]): IndicatorSettings {
+  const kdj = strategies.find((strategy) => strategy.id === "kdj")?.config ?? {};
+  const ma = strategies.find((strategy) => strategy.id === "ma")?.config ?? {};
+  const boll = strategies.find((strategy) => strategy.id === "boll")?.config ?? {};
+  return {
+    maShortPeriod: positiveInt(ma.short_period, 7),
+    maFastPeriod: positiveInt(ma.fast_period, 25),
+    maSlowPeriod: positiveInt(ma.slow_period, 99),
+    bollPeriod: positiveInt(boll.period, 20),
+    bollStddev: positiveNumber(boll.stddev, 2),
+    kdjPeriod: positiveInt(kdj.period, 26),
+    kdjKSmoothing: positiveInt(kdj.k_smoothing, 20),
+    kdjDSmoothing: positiveInt(kdj.d_smoothing, 9)
+  };
+}
+
+function positiveInt(value: unknown, fallback: number) {
+  const parsed = Math.round(Number(value));
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function positiveNumber(value: unknown, fallback: number) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
 function CoinStrategyCard({
   symbol,
   alerts,
@@ -616,6 +731,25 @@ function CoinStrategyCard({
   strategyIntervals: Record<string, string>;
   onChartSourceChange: (source: { source: string; source_role: string } | null) => void;
 }) {
+  return (
+    <article className="coin-card">
+      <CoinChart symbol={symbol} interval={chartInterval} onSourceChange={onChartSourceChange} />
+      <CoinAlertStack alerts={alerts} strategyIntervals={strategyIntervals} />
+    </article>
+  );
+}
+
+function CoinAlertStack({
+  alerts,
+  strategyIntervals,
+  collapsedHeight = COLLAPSED_ALERT_GROUP_HEIGHT,
+  className = ""
+}: {
+  alerts: AlertEvent[];
+  strategyIntervals: Record<string, string>;
+  collapsedHeight?: number;
+  className?: string;
+}) {
   const groups = [
     ["kdj", "KDJ"],
     ["ma", "MA"],
@@ -624,35 +758,33 @@ function CoinStrategyCard({
   const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>({});
   const [selectedAlert, setSelectedAlert] = useState<AlertEvent | null>(null);
   return (
-    <article className="coin-card">
-      <CoinChart symbol={symbol} interval={chartInterval} onSourceChange={onChartSourceChange} />
-      <div className="coin-alerts">
-        {groups.map(([strategyId, label]) => {
-          const selectedInterval = strategyIntervals[strategyId] ?? "15m";
-          const groupKey = `${strategyId}:${selectedInterval}`;
-          const allItems = alerts
-            .filter((alert) => alert.strategy_id === strategyId && alert.interval === selectedInterval)
-            .sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at));
-          const canExpand = allItems.length > 3;
-          const isExpanded = canExpand && Boolean(expandedGroups[groupKey]);
-          const items = allItems.slice(0, isExpanded ? 10 : 3);
-          return (
-            <CoinAlertGroup
-              key={strategyId}
-              strategyId={strategyId}
-              label={label}
-              selectedInterval={selectedInterval}
-              items={items}
-              canExpand={canExpand}
-              isExpanded={isExpanded}
-              onToggle={() => setExpandedGroups((current) => ({ ...current, [groupKey]: !isExpanded }))}
-              onAlertSelect={setSelectedAlert}
-            />
-          );
-        })}
-      </div>
+    <div className={className ? `coin-alerts ${className}` : "coin-alerts"}>
+      {groups.map(([strategyId, label]) => {
+        const selectedInterval = strategyIntervals[strategyId] ?? "15m";
+        const groupKey = `${strategyId}:${selectedInterval}`;
+        const allItems = alerts
+          .filter((alert) => alert.strategy_id === strategyId && alert.interval === selectedInterval)
+          .sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at));
+        const canExpand = allItems.length > 3;
+        const isExpanded = canExpand && Boolean(expandedGroups[groupKey]);
+        const items = allItems.slice(0, isExpanded ? 10 : 3);
+        return (
+          <CoinAlertGroup
+            key={strategyId}
+            strategyId={strategyId}
+            label={label}
+            selectedInterval={selectedInterval}
+            items={items}
+            canExpand={canExpand}
+            isExpanded={isExpanded}
+            collapsedHeight={collapsedHeight}
+            onToggle={() => setExpandedGroups((current) => ({ ...current, [groupKey]: !isExpanded }))}
+            onAlertSelect={setSelectedAlert}
+          />
+        );
+      })}
       {selectedAlert && <AlertDetailDialog alert={selectedAlert} onClose={() => setSelectedAlert(null)} />}
-    </article>
+    </div>
   );
 }
 
@@ -663,6 +795,7 @@ function CoinAlertGroup({
   items,
   canExpand,
   isExpanded,
+  collapsedHeight = COLLAPSED_ALERT_GROUP_HEIGHT,
   onToggle,
   onAlertSelect
 }: {
@@ -672,34 +805,35 @@ function CoinAlertGroup({
   items: AlertEvent[];
   canExpand: boolean;
   isExpanded: boolean;
+  collapsedHeight?: number;
   onToggle: () => void;
   onAlertSelect: (alert: AlertEvent) => void;
 }) {
   const groupRef = useRef<HTMLDivElement | null>(null);
-  const [expandedHeight, setExpandedHeight] = useState(COLLAPSED_ALERT_GROUP_HEIGHT);
+  const [expandedHeight, setExpandedHeight] = useState(collapsedHeight);
 
   useEffect(() => {
     if (!isExpanded || !groupRef.current) {
-      setExpandedHeight(COLLAPSED_ALERT_GROUP_HEIGHT);
+      setExpandedHeight(collapsedHeight);
       return;
     }
 
     const measure = () => {
       if (!groupRef.current) return;
-      setExpandedHeight(Math.max(COLLAPSED_ALERT_GROUP_HEIGHT, Math.ceil(groupRef.current.scrollHeight)));
+      setExpandedHeight(Math.max(collapsedHeight, Math.ceil(groupRef.current.scrollHeight)));
     };
 
     measure();
     const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(measure);
     observer?.observe(groupRef.current);
     return () => observer?.disconnect();
-  }, [isExpanded, items.length, selectedInterval]);
+  }, [isExpanded, items.length, selectedInterval, collapsedHeight]);
 
   return (
     <div
       ref={groupRef}
       className={isExpanded ? "coin-alert-group expanded" : "coin-alert-group"}
-      style={isExpanded ? { height: `${expandedHeight}px` } : undefined}
+      style={{ height: `${isExpanded ? expandedHeight : collapsedHeight}px` }}
     >
       <div className="coin-alert-group__title">
         <span className={`dot ${strategyId}`} />
@@ -1176,6 +1310,9 @@ function WhaleTargetCard({ target, onSelect }: { target: WhaleTarget; onSelect: 
   const amount = target.config.current_operation_amount;
   const positions = Array.isArray(target.config.positions) ? target.config.positions : [];
   const holdings = Array.isArray(target.config.holdings) ? target.config.holdings : [];
+  const defi = Array.isArray(target.config.defi_positions) ? target.config.defi_positions : [];
+  const updatedAt = typeof target.config.last_snapshot_at === "string" ? target.config.last_snapshot_at : target.updated_at;
+  const tags = whaleTags(target.config.tags);
   return (
     <button className="whale-card" onClick={() => onSelect(target.id)}>
       <div className="whale-card__head">
@@ -1183,13 +1320,14 @@ function WhaleTargetCard({ target, onSelect }: { target: WhaleTarget; onSelect: 
         <div>
           <strong>{target.label}</strong>
           <small>{target.address_or_subject}</small>
+          <TagPills tags={tags} />
         </div>
         <em>{target.enabled ? "关注中" : "已关闭"}</em>
       </div>
       <div className="whale-stats">
         <div><small>当前操作金额</small><strong>{amount ? `$${formatNumber(amount, 2)}` : "待同步"}</strong></div>
-        <div><small>持仓</small><strong>{positions.length} 合约 / {holdings.length} 现货</strong></div>
-        <div><small>动态</small><strong>点击查看</strong></div>
+        <div><small>持仓</small><strong>{positions.length} 合约 / {holdings.length + defi.length} 资产</strong></div>
+        <div><small>更新</small><strong>{updatedAt ? cnDate(updatedAt) : "待同步"}</strong></div>
       </div>
     </button>
   );
@@ -1197,10 +1335,20 @@ function WhaleTargetCard({ target, onSelect }: { target: WhaleTarget; onSelect: 
 
 function WhaleDetailPage({ targetId, onBack }: { targetId: string; onBack: () => void }) {
   const { data, isLoading } = useQuery({ queryKey: ["whale", targetId], queryFn: () => api.whaleDetail(targetId) });
+  const [tab, setTab] = useState<"basic" | "contracts" | "fills" | "spot" | "orders" | "ledger" | "history" | "events">("contracts");
   if (isLoading || !data) return <div className="boot">正在加载地址详情…</div>;
   const target = data.target;
   const positions = data.positions;
   const holdings = data.holdings;
+  const defiPositions = data.defi_positions ?? [];
+  const openOrders = data.open_orders ?? [];
+  const fills = data.fills ?? [];
+  const funding = data.funding ?? [];
+  const ledgerUpdates = data.ledger_updates ?? [];
+  const historicalOrders = data.historical_orders ?? [];
+  const account = data.account_summary ?? {};
+  const sourceStatus = data.snapshot?.source_status ?? {};
+  const tags = whaleTags(target.config.tags);
   return (
     <div className="whale-detail">
       <div className="whale-detail__hero">
@@ -1209,28 +1357,106 @@ function WhaleDetailPage({ targetId, onBack }: { targetId: string; onBack: () =>
         <div>
           <h2>{target.label}</h2>
           <p>{target.address_or_subject}</p>
+          <TagPills tags={tags} />
         </div>
-        <button>跟单</button>
+        <span className={target.enabled ? "status on" : "status off"}>{target.enabled ? "关注中" : "已关闭"}</span>
       </div>
       <div className="whale-tabs">
-        <span>基本信息</span>
-        <span className="active">合约 ({positions.length})</span>
-        <span>现货 ({holdings.length})</span>
-        <span>当前委托</span>
-        <span>最近动态</span>
+        <button className={tab === "basic" ? "active" : ""} onClick={() => setTab("basic")}>基本信息</button>
+        <button className={tab === "contracts" ? "active" : ""} onClick={() => setTab("contracts")}>合约 ({positions.length})</button>
+        <button className={tab === "fills" ? "active" : ""} onClick={() => setTab("fills")}>最近成交 ({fills.length})</button>
+        <button className={tab === "spot" ? "active" : ""} onClick={() => setTab("spot")}>现货/DeFi ({holdings.length + defiPositions.length})</button>
+        <button className={tab === "orders" ? "active" : ""} onClick={() => setTab("orders")}>当前委托 ({openOrders.length})</button>
+        <button className={tab === "ledger" ? "active" : ""} onClick={() => setTab("ledger")}>资金流水 ({funding.length + ledgerUpdates.length})</button>
+        <button className={tab === "history" ? "active" : ""} onClick={() => setTab("history")}>历史订单 ({historicalOrders.length})</button>
+        <button className={tab === "events" ? "active" : ""} onClick={() => setTab("events")}>最近动态</button>
       </div>
-      <Panel title="持仓列表" dragHandle={false} action={<span className="pill">共 {positions.length} 个持仓</span>}>
-        <div className="position-list">
-          {positions.map((position, index) => <PositionCard key={index} position={position} />)}
-          {!positions.length && <div className="empty-state">暂无真实持仓数据。配置巨鲸 API 后，这里会按币安持仓页样式展示仓位价值、保证金、开仓均价、强平价格、资金费和盈亏。</div>}
-        </div>
-      </Panel>
-      <Panel title="操作动态" dragHandle={false}>
-        <div className="records">
-          {data.recent_events.map((event) => <span key={String(event.id)}>{cnDate(event.occurred_at_utc)} · {String(event.summary)}</span>)}
-          {!data.recent_events.length && <span className="empty">暂无操作动态</span>}
-        </div>
-      </Panel>
+      {tab === "basic" && (
+        <Panel title="基本信息" dragHandle={false} action={data.updated_at ? <span className="pill">更新 {cnDate(data.updated_at)}</span> : undefined}>
+          <div className="whale-summary-grid">
+            <Metric label="合约名义价值" value={money(account.contract_notional)} />
+            <Metric label="合约未实现盈亏" value={money(account.contract_pnl)} tone={Number(account.contract_pnl ?? 0) >= 0 ? "up" : "down"} />
+            <Metric label="现货资产" value={money(account.spot_value ?? account.total_balance)} />
+            <Metric label="DeFi 仓位" value={money(account.defi_value)} />
+            <Metric label="可提现" value={money(account.withdrawable, { showZero: true })} />
+            <Metric label="保证金占用" value={money(account.total_margin_used)} />
+          </div>
+          <div className="records compact">
+            {Object.entries(sourceStatus).map(([source, status]) => {
+              const item = status as Record<string, any>;
+              return <span key={source}>{source}: {item.ok ? "正常" : String(item.message ?? "未启用")}</span>;
+            })}
+            {!Object.keys(sourceStatus).length && <span className="empty">暂无数据源状态</span>}
+          </div>
+        </Panel>
+      )}
+      {tab === "contracts" && (
+        <Panel title="持仓列表" dragHandle={false} action={<span className="pill">共 {positions.length} 个持仓</span>}>
+          <div className="position-list">
+            {positions.map((position, index) => <PositionCard key={index} position={position} />)}
+            {!positions.length && <div className="empty-state">暂无合约持仓。启用巨鲸策略并配置完整 0x 地址后，Hyperliquid 会同步仓位价值、保证金、开仓均价、强平价格、资金费和盈亏。</div>}
+          </div>
+        </Panel>
+      )}
+      {tab === "spot" && (
+        <Panel title="现货与 DeFi 仓位" dragHandle={false} action={<span className="pill">{holdings.length} 现货 / {defiPositions.length} 协议</span>}>
+          <div className="asset-list">
+            {holdings.map((holding, index) => <AssetCard key={`holding-${index}`} item={holding} />)}
+            {defiPositions.map((item, index) => <AssetCard key={`defi-${index}`} item={item} protocol />)}
+            {!holdings.length && !defiPositions.length && <div className="empty-state">暂无多链资产数据。配置 DeBank AccessKey 后会同步现货资产和 DeFi 协议仓位。</div>}
+          </div>
+        </Panel>
+      )}
+      {tab === "fills" && (
+        <Panel title="最近成交" dragHandle={false} action={<span className="pill">共 {fills.length} 笔</span>}>
+          <div className="whale-table">
+            {fills.map((fill, index) => <WhaleFillRow key={`${fill.hash ?? fill.trade_id ?? index}`} fill={fill} isLarge={isLargeTrade(fill, target.config)} />)}
+            {!fills.length && <span className="empty">暂无最近成交</span>}
+          </div>
+        </Panel>
+      )}
+      {tab === "orders" && (
+        <Panel title="当前委托" dragHandle={false}>
+          <div className="records">
+            {openOrders.map((order, index) => <OrderRow key={index} order={order} />)}
+            {!openOrders.length && <span className="empty">暂无当前委托</span>}
+          </div>
+        </Panel>
+      )}
+      {tab === "ledger" && (
+        <Panel title="资金流水与资金费" dragHandle={false}>
+          <div className="whale-table">
+            {funding.map((item, index) => <FundingRow key={`funding-${index}`} item={item} />)}
+            {ledgerUpdates.map((item, index) => <LedgerRow key={`ledger-${index}`} item={item} />)}
+            {!funding.length && !ledgerUpdates.length && <span className="empty">暂无资金费或出入金流水</span>}
+          </div>
+        </Panel>
+      )}
+      {tab === "history" && (
+        <Panel title="历史订单" dragHandle={false}>
+          <div className="whale-table">
+            {historicalOrders.map((order, index) => <OrderRow key={index} order={order} />)}
+            {!historicalOrders.length && <span className="empty">暂无历史订单</span>}
+          </div>
+        </Panel>
+      )}
+      {tab === "events" && (
+        <Panel title="操作动态" dragHandle={false}>
+          <div className="records">
+            {data.recent_events.map((event) => <span key={String(event.id)}>{cnDate(event.occurred_at_utc)} · {String(event.summary)}</span>)}
+            {!data.recent_events.length && <span className="empty">暂无操作动态</span>}
+          </div>
+        </Panel>
+      )}
+    </div>
+  );
+}
+
+function Metric({ label, value, tone }: { label: string; value: string; tone?: "up" | "down" }) {
+  return (
+    <div>
+      <small>{label}</small>
+      <strong className={tone}>{value}</strong>
     </div>
   );
 }
@@ -1243,18 +1469,127 @@ function PositionCard({ position }: { position: Record<string, any> }) {
         <span>{String(position.side ?? "方向")}</span>
         <span>{String(position.margin_mode ?? "全仓")}</span>
         <span>{String(position.leverage ?? "--")}x</span>
-        <b className={Number(position.pnl ?? 0) >= 0 ? "up" : "down"}>{formatNumber(position.pnl ?? 0, 2)}</b>
+        <b className={Number(position.pnl ?? 0) >= 0 ? "up" : "down"}>{money(position.pnl)}</b>
       </div>
       <div className="position-grid">
         <div><small>持仓量</small><strong>{String(position.size ?? "--")}</strong></div>
-        <div><small>保证金</small><strong>{formatNumber(position.margin ?? 0, 2)}</strong></div>
-        <div><small>仓位价值</small><strong>{formatNumber(position.notional ?? 0, 2)}</strong></div>
-        <div><small>开仓均价</small><strong>{formatNumber(position.entry_price ?? 0, 2)}</strong></div>
-        <div><small>标记价格</small><strong>{formatNumber(position.mark_price ?? 0, 2)}</strong></div>
-        <div><small>强平价格</small><strong>{formatNumber(position.liquidation_price ?? 0, 2)}</strong></div>
+        <div><small>保证金</small><strong>{money(position.margin)}</strong></div>
+        <div><small>仓位价值</small><strong>{money(position.notional)}</strong></div>
+        <div><small>开仓均价</small><strong>{money(position.entry_price)}</strong></div>
+        <div><small>标记价格</small><strong>{money(position.mark_price)}</strong></div>
+        <div><small>强平价格</small><strong>{money(position.liquidation_price)}</strong></div>
+        <div><small>资金费</small><strong>{money(position.funding)}</strong></div>
+        <div><small>强平距离</small><strong>{position.liquidation_distance_pct == null ? "--" : `${formatNumber(position.liquidation_distance_pct, 2)}%`}</strong></div>
       </div>
     </article>
   );
+}
+
+function AssetCard({ item, protocol = false }: { item: Record<string, any>; protocol?: boolean }) {
+  return (
+    <article className="asset-card">
+      <div>
+        <strong>{String(item.symbol ?? item.name ?? "UNKNOWN")}</strong>
+        <small>{protocol ? "DeFi 协议" : String(item.chain ?? "现货资产")}</small>
+      </div>
+      <b>{money(item.value)}</b>
+      {!protocol && <span>{formatNumber(item.amount ?? 0, 4)} @ {money(item.price)}</span>}
+      {protocol && <span>{String(item.chain ?? "--")} · {String(item.item_count ?? 0)} 项仓位</span>}
+    </article>
+  );
+}
+
+function WhaleFillRow({ fill, isLarge = false }: { fill: Record<string, any>; isLarge?: boolean }) {
+  const positive = Number(fill.closed_pnl ?? 0) >= 0;
+  const directionLabel = String(fill.direction_label ?? fill.direction ?? "--");
+  const priceLabel = String(fill.price_label ?? "成交价格");
+  return (
+    <article className="whale-row">
+      <div>
+        <strong>{directionLabel} {String(fill.coin ?? "")}{isLarge ? " · 大额" : ""}</strong>
+        <small>{cnDateFromAny(fill.timestamp)}</small>
+      </div>
+      <div><small>数量</small><strong>{formatNumber(fill.size ?? 0, 4)}</strong></div>
+      <div><small>{priceLabel}</small><strong>{money(fill.price)}</strong></div>
+      <div><small>成交额</small><strong>{money(fill.notional)}</strong></div>
+      <div><small>手续费</small><strong>{fill.fee == null ? "--" : `${formatNumber(fill.fee, 4)} ${String(fill.fee_token ?? "")}`}</strong></div>
+      <div><small>已实现盈亏</small><strong className={positive ? "up" : "down"}>{money(fill.closed_pnl, { showZero: true })}</strong></div>
+    </article>
+  );
+}
+
+function FillRow({ fill, isLarge = false }: { fill: Record<string, any>; isLarge?: boolean }) {
+  const positive = Number(fill.closed_pnl ?? 0) >= 0;
+  const directionLabel = String(fill.direction_label ?? fill.direction ?? "--");
+  const priceLabel = String(fill.price_label ?? "成交价格");
+  return (
+    <article className="whale-row">
+      <div>
+        <strong>{String(fill.side ?? "--")} {String(fill.coin ?? "")}{isLarge ? " · 大额" : ""}</strong>
+        <small>{cnDateFromAny(fill.timestamp)} · {String(fill.direction ?? "--")}</small>
+      </div>
+      <div><small>数量</small><strong>{formatNumber(fill.size ?? 0, 4)}</strong></div>
+      <div><small>均价</small><strong>{money(fill.price)}</strong></div>
+      <div><small>成交额</small><strong>{money(fill.notional)}</strong></div>
+      <div><small>手续费</small><strong>{fill.fee == null ? "--" : `${formatNumber(fill.fee, 4)} ${String(fill.fee_token ?? "")}`}</strong></div>
+      <div><small>已实现盈亏</small><strong className={positive ? "up" : "down"}>{money(fill.closed_pnl, { showZero: true })}</strong></div>
+    </article>
+  );
+}
+
+function OrderRow({ order }: { order: Record<string, any> }) {
+  return (
+    <article className="whale-row">
+      <div>
+        <strong>{String(order.symbol ?? "UNKNOWN")} · {String(order.side ?? "--")}</strong>
+        <small>{cnDateFromAny(order.timestamp)} · {String(order.status ?? order.order_type ?? "--")}</small>
+      </div>
+      <div><small>数量</small><strong>{formatNumber(order.size ?? 0, 4)}</strong></div>
+      <div><small>价格</small><strong>{money(order.price)}</strong></div>
+      <div><small>名义价值</small><strong>{money(order.notional)}</strong></div>
+    </article>
+  );
+}
+
+function FundingRow({ item }: { item: Record<string, any> }) {
+  return (
+    <article className="whale-row">
+      <div>
+        <strong>资金费 {String(item.coin ?? "")}</strong>
+        <small>{cnDateFromAny(item.timestamp)}</small>
+      </div>
+      <div><small>金额</small><strong>{money(item.amount, { showZero: true })}</strong></div>
+      <div><small>费率</small><strong>{item.funding_rate == null ? "--" : `${formatNumber(Number(item.funding_rate) * 100, 4)}%`}</strong></div>
+      <div><small>仓位</small><strong>{item.position_size == null ? "--" : formatNumber(item.position_size, 4)}</strong></div>
+    </article>
+  );
+}
+
+function LedgerRow({ item }: { item: Record<string, any> }) {
+  return (
+    <article className="whale-row">
+      <div>
+        <strong>{String(item.type ?? "流水")}</strong>
+        <small>{cnDateFromAny(item.timestamp)}{item.hash ? ` · ${String(item.hash).slice(0, 10)}…` : ""}</small>
+      </div>
+      <div><small>金额</small><strong>{money(item.amount, { showZero: true })}</strong></div>
+    </article>
+  );
+}
+
+function cnDateFromAny(value: unknown) {
+  if (value == null || value === "") return "暂无";
+  if (typeof value === "number") return cnDate(new Date(value).toISOString());
+  const asNumber = Number(value);
+  if (Number.isFinite(asNumber) && String(value).length >= 10) return cnDate(new Date(asNumber).toISOString());
+  return cnDate(String(value));
+}
+
+function money(value: unknown, options: { showZero?: boolean } = {}) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return "--";
+  if (num === 0 && !options.showZero) return "--";
+  return `$${num.toLocaleString("zh-CN", { maximumFractionDigits: Math.abs(num) >= 100 ? 0 : 2, minimumFractionDigits: 0 })}`;
 }
 
 function Admin({ data }: { data: Snapshot }) {
@@ -1463,18 +1798,38 @@ function AdminContent({
         </div>
       </Panel>
 
-      <Panel title="策略配置" dragHandle={false}>
-        <div className="strategy-editors">
-          {strategies.map((strategy, index) => (
-            <StrategyEditor
-              key={strategy.id}
-              strategy={strategy}
-              notifiers={notifiers}
-              onChange={(next) => updateArray(strategies, setStrategies, index, next)}
-              onSave={() => saveStrategy.mutate(strategy)}
-              disabled={false}
-            />
-          ))}
+      <Panel title="策略配置" dragHandle={false} className="strategy-config-panel">
+        <div className="strategy-groups">
+          {STRATEGY_GROUPS.map((group) => {
+            const groupStrategies = group.ids
+              .map((strategyId) => {
+                const index = strategies.findIndex((strategy) => strategy.id === strategyId);
+                return index >= 0 ? { strategy: strategies[index], index } : null;
+              })
+              .filter((item): item is { strategy: MutableStrategy; index: number } => item !== null);
+            if (!groupStrategies.length) return null;
+            return (
+              <section className="strategy-group" key={group.title}>
+                <div className="strategy-group__head">
+                  <strong>{group.title}</strong>
+                  <span>{groupStrategies.length} 项</span>
+                </div>
+                <div className="strategy-editors">
+                  {groupStrategies.map(({ strategy, index }) => (
+                    <StrategyEditor
+                      key={strategy.id}
+                      strategy={strategy}
+                      notifiers={notifiers}
+                      onChange={(next) => updateArray(strategies, setStrategies, index, next)}
+                      onSave={() => saveStrategy.mutate(strategy)}
+                      disabled={false}
+                    />
+                  ))}
+                </div>
+                {group.whaleTargets && <WhaleTargetManager setNotice={setNotice} embedded />}
+              </section>
+            );
+          })}
         </div>
       </Panel>
 
@@ -1531,6 +1886,135 @@ function AdminContent({
         </div>
       </Panel>
     </div>
+  );
+}
+
+function WhaleTargetManager({ setNotice, embedded = false }: { setNotice: (notice: string) => void; embedded?: boolean }) {
+  const queryClient = useQueryClient();
+  const whalesQuery = useQuery({ queryKey: ["whales"], queryFn: api.whales });
+  const [drafts, setDrafts] = useState<WhaleTargetUpsert[]>([]);
+  const [resolveQuery, setResolveQuery] = useState("");
+  const [candidates, setCandidates] = useState<WhaleAddressCandidate[]>([]);
+  const persistedTargets = whalesQuery.data ?? [];
+  const persistedIds = useMemo(() => new Set(persistedTargets.map((target) => target.id)), [persistedTargets]);
+  useEffect(() => {
+    if (whalesQuery.data) setDrafts(whalesQuery.data.map(whaleToDraft));
+  }, [whalesQuery.data]);
+
+  const saveTarget = useMutation({
+    mutationFn: api.saveWhaleTarget,
+    onSuccess: () => {
+      setNotice("关注对象已保存");
+      queryClient.invalidateQueries({ queryKey: ["whales"] });
+      queryClient.invalidateQueries({ queryKey: ["snapshot"] });
+    },
+    onError: (error) => setNotice(`关注对象保存失败：${readErrorMessage(error)}`)
+  });
+  const deleteTarget = useMutation({
+    mutationFn: api.deleteWhaleTarget,
+    onSuccess: () => {
+      setNotice("关注对象已删除");
+      queryClient.invalidateQueries({ queryKey: ["whales"] });
+      queryClient.invalidateQueries({ queryKey: ["snapshot"] });
+    },
+    onError: (error) => setNotice(`关注对象删除失败：${readErrorMessage(error)}`)
+  });
+  const resolveAddress = useMutation({
+    mutationFn: api.resolveWhaleAddress,
+    onSuccess: (result) => {
+      setCandidates(result.candidates);
+      setNotice(result.candidates.length ? `找到 ${result.candidates.length} 个候选地址` : "没有找到完整 0x 地址，请粘贴地址或详情页链接");
+    },
+    onError: (error) => setNotice(`地址解析失败：${readErrorMessage(error)}`)
+  });
+
+  const addCandidate = (candidate: WhaleAddressCandidate) => {
+    setDrafts((current) => {
+      const draft = createWhaleDraft(candidate);
+      const address = candidate.address.toLowerCase();
+      const replaceIndex = current.findIndex((target) => {
+        const addresses = [target.address_or_subject, ...arr(target.config.addresses)].map((value) => value.toLowerCase());
+        return addresses.includes(address)
+          || addresses.some((value) => isSameShortAddress(value, address))
+          || (isIncompleteWhaleTarget(target) && slugify(target.label) === slugify(candidate.label));
+      });
+      if (replaceIndex < 0) return [draft, ...current];
+      return current.map((target, index) => index === replaceIndex ? mergeWhaleCandidate(target, candidate) : target);
+    });
+  };
+
+  const removeTarget = (target: WhaleTargetUpsert, index: number) => {
+    const duplicateIdCount = target.id ? drafts.filter((item) => item.id === target.id).length : 0;
+    const persisted = target.id ? persistedTargets.find((item) => item.id === target.id) : undefined;
+    const isEditedDuplicate = !!persisted
+      && duplicateIdCount > 1
+      && (persisted.label !== target.label || persisted.address_or_subject !== target.address_or_subject);
+    if (!target.id || !persistedIds.has(target.id) || isEditedDuplicate) {
+      setDrafts((current) => current.filter((_, itemIndex) => itemIndex !== index));
+      return;
+    }
+    setDrafts((current) => current.filter((_, itemIndex) => itemIndex !== index));
+    deleteTarget.mutate(target.id, {
+      onError: () => queryClient.invalidateQueries({ queryKey: ["whales"] })
+    });
+  };
+
+  const addButton = <button onClick={() => setDrafts((current) => [createWhaleDraft(), ...current])}><Plus size={16} /> 新增</button>;
+  const content = (
+      <div className="whale-admin">
+        <div className="whale-resolver">
+          <input value={resolveQuery} onChange={(event) => setResolveQuery(event.target.value)} placeholder="粘贴 0x 地址、Hyperliquid/Etherscan/DeBank/Arkham 链接，或输入本地昵称" />
+          <button disabled={!resolveQuery.trim() || resolveAddress.isPending} onClick={() => resolveAddress.mutate(resolveQuery)}><PawPrint size={16} /> 解析</button>
+        </div>
+        {!!candidates.length && (
+          <div className="candidate-list">
+            {candidates.map((candidate, index) => (
+              <button key={`${candidate.address}-${index}`} onClick={() => addCandidate(candidate)}>
+                <strong>{candidate.label}</strong>
+                <span>{candidate.address}</span>
+                <small>{candidate.source}</small>
+              </button>
+            ))}
+          </div>
+        )}
+        <div className="target-list">
+          {drafts.map((target, index) => (
+            <div className="whale-target-row" key={`${target.id ?? "new"}-${index}`}>
+              <Switch checked={target.enabled} onChange={(enabled) => updateArray(drafts, setDrafts, index, { enabled })} />
+              <input value={target.label} onChange={(event) => updateArray(drafts, setDrafts, index, { label: event.target.value })} placeholder="名称，例如 麻吉大哥" />
+              <input value={target.address_or_subject} onChange={(event) => updateArray(drafts, setDrafts, index, { address_or_subject: event.target.value })} placeholder="主地址（必填）" />
+              <WhaleTagSelector value={whaleTags(target.config.tags)} onChange={(tags) => updateArray(drafts, setDrafts, index, { config: { ...target.config, tags } })} />
+              <input value={String(target.config.source_url ?? "")} onChange={(event) => updateArray(drafts, setDrafts, index, { config: { ...target.config, source_url: event.target.value } })} placeholder="来源链接（选填，不影响监控）" />
+              <button disabled={saveTarget.isPending || !target.label.trim() || !target.address_or_subject.trim()} onClick={() => saveTarget.mutate(target)}><Save size={16} /> 保存</button>
+              <button className="danger-button" disabled={deleteTarget.isPending} onClick={() => removeTarget(target, index)}><Trash2 size={16} /> 删除</button>
+            </div>
+          ))}
+          {!drafts.length && <span className="empty">暂无关注对象。先解析地址或点击新增。</span>}
+        </div>
+      </div>
+  );
+
+  if (embedded) {
+    return (
+      <section className="whale-target-section">
+        <div className="whale-target-section__head">
+          <strong>关注对象</strong>
+          {addButton}
+        </div>
+        {content}
+      </section>
+    );
+  }
+
+  return (
+    <Panel
+      title="巨鲸关注对象"
+      dragHandle={false}
+      className="whale-admin-panel"
+      action={addButton}
+    >
+      {content}
+    </Panel>
   );
 }
 
@@ -1643,9 +2127,33 @@ function StrategyEditor({
         {strategy.id === "whale" && (
           <>
             <Switch checked={Boolean(config.enabled)} onChange={(enabled) => setConfig({ enabled })} label="启用巨鲸" />
-            <TextField label="Provider" value={String(config.provider ?? "")} onChange={(provider) => setConfig({ provider })} />
-            <TextField label="Base URL" value={String(config.base_url ?? "")} onChange={(base_url) => setConfig({ base_url })} />
-            <TextField label="API Key" value={String(config.api_key ?? "")} onChange={(api_key) => setConfig({ api_key })} />
+            <Switch checked={Boolean(config.hyperliquid_enabled ?? true)} onChange={(hyperliquid_enabled) => setConfig({ hyperliquid_enabled })} label="Hyperliquid 合约" />
+            <TextField label="Hyperliquid API" value={String(config.hyperliquid_base_url ?? "https://api.hyperliquid.xyz")} onChange={(hyperliquid_base_url) => setConfig({ hyperliquid_base_url })} />
+            <Switch checked={Boolean(config.debank_enabled)} onChange={(debank_enabled) => setConfig({ debank_enabled })} label="DeBank 多链资产" />
+            <TextField label="DeBank API" value={String(config.debank_base_url ?? "https://pro-openapi.debank.com")} onChange={(debank_base_url) => setConfig({ debank_base_url })} />
+            <TextField label="DeBank AccessKey" value={String(config.debank_access_key ?? "")} onChange={(debank_access_key) => setConfig({ debank_access_key })} />
+            <NumberField label="主轮询秒" value={config.poll_seconds ?? 300} onChange={(poll_seconds) => setConfig({ poll_seconds: Math.max(300, poll_seconds) })} />
+            <Switch checked={Boolean(config.trade_monitor_enabled ?? true)} onChange={(trade_monitor_enabled) => setConfig({ trade_monitor_enabled })} label="成交监控" />
+            <Switch checked={Boolean(config.trade_notification_enabled ?? true)} onChange={(trade_notification_enabled) => setConfig({ trade_notification_enabled })} label="成交机器人提醒" />
+            <NumberField label="成交轮询秒" value={config.trade_poll_seconds ?? 120} onChange={(trade_poll_seconds) => setConfig({ trade_poll_seconds: Math.max(120, trade_poll_seconds) })} />
+            <NumberField label="扩展信息轮询秒" value={config.extended_poll_seconds ?? 1800} onChange={(extended_poll_seconds) => setConfig({ extended_poll_seconds: Math.max(1800, extended_poll_seconds) })} />
+            <NumberField label="前台大额美元阈值" value={config.trade_min_notional_usd ?? 100000} onChange={(trade_min_notional_usd) => setConfig({ trade_min_notional_usd })} />
+            <NumberField label="ETH 数量阈值" value={tradeCoinThreshold(config, "ETH", 100)} onChange={(value) => setConfig({ trade_coin_thresholds: { ...tradeCoinThresholds(config), ETH: value } })} />
+            <NumberField label="BTC 数量阈值" value={tradeCoinThreshold(config, "BTC", 5)} onChange={(value) => setConfig({ trade_coin_thresholds: { ...tradeCoinThresholds(config), BTC: value } })} />
+            <NumberField label="SOL 数量阈值" value={tradeCoinThreshold(config, "SOL", 10000)} onChange={(value) => setConfig({ trade_coin_thresholds: { ...tradeCoinThresholds(config), SOL: value } })} />
+            <SelectField
+              label="首次成交同步"
+              value={String(config.initial_fill_sync_mode ?? "cursor_only")}
+              options={[
+                { value: "cursor_only", label: "只记录游标" },
+                { value: "lookback_3h", label: "回看 3 小时" },
+                { value: "today", label: "今天全量" }
+              ]}
+              onChange={(initial_fill_sync_mode) => setConfig({ initial_fill_sync_mode })}
+            />
+            <NumberField label="仓位变化告警 %" value={config.position_change_alert_pct ?? 25} onChange={(position_change_alert_pct) => setConfig({ position_change_alert_pct })} />
+            <NumberField label="最小仓位美元" value={config.min_position_value_usd ?? 10000} onChange={(min_position_value_usd) => setConfig({ min_position_value_usd })} />
+            <NumberField label="强平距离 %" value={config.liquidation_distance_pct ?? 5} onChange={(liquidation_distance_pct) => setConfig({ liquidation_distance_pct })} />
           </>
         )}
       </div>
@@ -1747,6 +2255,69 @@ function arr(value: unknown): string[] {
   return Array.isArray(value) ? value.map(String) : [];
 }
 
+function tradeCoinThresholds(config: Record<string, any>): Record<string, number> {
+  return typeof config.trade_coin_thresholds === "object" && config.trade_coin_thresholds !== null
+    ? config.trade_coin_thresholds as Record<string, number>
+    : {};
+}
+
+function tradeCoinThreshold(config: Record<string, any>, coin: string, fallback: number) {
+  const thresholds = tradeCoinThresholds(config);
+  const value = Number(thresholds[coin]);
+  return Number.isFinite(value) ? value : fallback;
+}
+
+function isLargeTrade(fill: Record<string, any>, config: Record<string, any>) {
+  const notional = Number(fill.notional ?? 0);
+  const usdThreshold = Number(config.trade_min_notional_usd ?? 100000);
+  if (Number.isFinite(notional) && Number.isFinite(usdThreshold) && notional >= usdThreshold) return true;
+  const coin = String(fill.coin ?? "").toUpperCase();
+  const size = Math.abs(Number(fill.size ?? 0));
+  const threshold = tradeCoinThreshold(config, coin, 0);
+  return threshold > 0 && Number.isFinite(size) && size >= threshold;
+}
+
+function whaleTags(value: unknown): string[] {
+  const tags = arr(value).filter((tag) => WHALE_TAG_OPTIONS.includes(tag));
+  return tags.length ? tags : ["聪明钱"];
+}
+
+function toggleWhaleTag(tags: string[], tag: string) {
+  const current = new Set(whaleTags(tags));
+  if (current.has(tag)) current.delete(tag);
+  else current.add(tag);
+  return current.size ? WHALE_TAG_OPTIONS.filter((item) => current.has(item)) : ["聪明钱"];
+}
+
+function TagPills({ tags }: { tags: string[] }) {
+  return (
+    <span className="tag-pills">
+      {whaleTags(tags).map((tag) => <span key={tag}>{tag}</span>)}
+    </span>
+  );
+}
+
+function WhaleTagSelector({ value, onChange }: { value: string[]; onChange: (tags: string[]) => void }) {
+  const tags = whaleTags(value);
+  return (
+    <details className="tag-dropdown">
+      <summary>{tags.join("、")}</summary>
+      <div className="tag-dropdown__menu">
+        {WHALE_TAG_OPTIONS.map((tag) => (
+          <label key={tag}>
+            <input
+              type="checkbox"
+              checked={tags.includes(tag)}
+              onChange={() => onChange(toggleWhaleTag(tags, tag))}
+            />
+            <span>{tag}</span>
+          </label>
+        ))}
+      </div>
+    </details>
+  );
+}
+
 function split(value: string): string[] {
   return value.split(",").map((item) => item.trim()).filter(Boolean);
 }
@@ -1762,6 +2333,60 @@ function createNotifier(): NotifierTarget {
     created_at: "",
     updated_at: ""
   };
+}
+
+function whaleToDraft(target: WhaleTarget): WhaleTargetUpsert {
+  return {
+    id: target.id,
+    label: target.label,
+    address_or_subject: target.address_or_subject,
+    enabled: target.enabled,
+    config: {
+      ...target.config,
+      tags: whaleTags(target.config.tags),
+      addresses: arr(target.config.addresses)
+    }
+  };
+}
+
+function createWhaleDraft(candidate?: WhaleAddressCandidate): WhaleTargetUpsert {
+  const address = candidate?.address ?? "";
+  return {
+    id: null,
+    label: candidate?.label ?? "新关注对象",
+    address_or_subject: address,
+    enabled: true,
+    config: {
+      tags: ["聪明钱"],
+      addresses: address ? [address] : [],
+      source_url: candidate?.url ?? ""
+    }
+  };
+}
+
+function mergeWhaleCandidate(target: WhaleTargetUpsert, candidate: WhaleAddressCandidate): WhaleTargetUpsert {
+  const address = candidate.address.toLowerCase();
+  return {
+    ...target,
+    label: target.label.trim() ? target.label : candidate.label,
+    address_or_subject: candidate.address,
+    config: {
+      ...target.config,
+      tags: whaleTags(target.config.tags),
+      addresses: Array.from(new Set([address, ...arr(target.config.addresses).map((item) => item.toLowerCase())])),
+      source_url: target.config.source_url || candidate.url || ""
+    }
+  };
+}
+
+function isIncompleteWhaleTarget(target: WhaleTargetUpsert) {
+  const values = [target.address_or_subject, ...arr(target.config.addresses)];
+  return !values.some((value) => /^0x[a-fA-F0-9]{40}$/.test(value)) || values.some((value) => value.includes("..."));
+}
+
+function isSameShortAddress(value: string, fullAddress: string) {
+  const match = value.toLowerCase().match(/^(0x[a-f0-9]{4,})\.\.\.([a-f0-9]{4,})$/);
+  return !!match && fullAddress.toLowerCase().startsWith(match[1]) && fullAddress.toLowerCase().endsWith(match[2]);
 }
 
 function slugify(value: string) {

@@ -84,20 +84,48 @@ class OkxSwapDataSource:
         inst_id = OKX_SYMBOL_MAP.get(symbol)
         if not inst_id:
             raise DataSourceError(f"Unsupported symbol for OKX: {symbol}")
-        try:
-            response = requests.get(
-                f"{self.base_url}/api/v5/market/history-candles",
-                params={"instId": inst_id, "bar": self._map_interval(interval), "limit": limit},
-                timeout=self.timeout_seconds,
-            )
-            response.raise_for_status()
-            payload = response.json()
-        except requests.RequestException as exc:
-            raise DataSourceError(f"OKX request failed: {exc}") from exc
+        rows = []
+        seen_timestamps: set[str] = set()
+        cursor: str | None = None
+        requested = min(max(limit, 1), 1000)
 
-        rows = payload.get("data")
-        if rows is None:
-            raise DataSourceError(f"OKX returned unexpected payload: {payload}")
+        while len(rows) < requested:
+            batch_limit = min(100, requested - len(rows))
+            params = {"instId": inst_id, "bar": self._map_interval(interval), "limit": batch_limit}
+            if cursor:
+                params["after"] = cursor
+            try:
+                response = requests.get(
+                    f"{self.base_url}/api/v5/market/history-candles",
+                    params=params,
+                    timeout=self.timeout_seconds,
+                )
+                response.raise_for_status()
+                payload = response.json()
+            except requests.RequestException as exc:
+                raise DataSourceError(f"OKX request failed: {exc}") from exc
+
+            if str(payload.get("code", "0")) != "0":
+                raise DataSourceError(f"OKX returned error: {payload}")
+            batch = payload.get("data")
+            if batch is None:
+                raise DataSourceError(f"OKX returned unexpected payload: {payload}")
+            if not batch:
+                break
+
+            for row in batch:
+                timestamp = str(row[0])
+                if timestamp in seen_timestamps:
+                    continue
+                rows.append(row)
+                seen_timestamps.add(timestamp)
+                if len(rows) >= requested:
+                    break
+
+            next_cursor = str(batch[-1][0])
+            if next_cursor == cursor or len(batch) < batch_limit:
+                break
+            cursor = next_cursor
 
         return [
             Candle(
@@ -110,7 +138,7 @@ class OkxSwapDataSource:
                 volume=float(row[5]),
                 source=self.name,
             )
-            for row in reversed(rows)
+            for row in reversed(rows[:requested])
         ]
 
     @staticmethod

@@ -29,8 +29,11 @@ from .api.schemas import (
     StrategyConfig,
     StrategyUpdate,
     SymbolItem,
+    WhaleAddressResolveRequest,
+    WhaleAddressResolveResponse,
     WhaleDetailOut,
     WhaleTargetOut,
+    WhaleTargetUpsert,
 )
 from .core.database import Database
 from .core.security import make_admin_token, verify_admin_token
@@ -44,6 +47,7 @@ from .services.notifiers import NotificationService
 from .services.store import Store
 from .services.strategies import TechnicalStrategyRunner
 from .services.translator import Translator
+from .services.whale_runner import WhaleRunner
 
 
 settings = load_runtime_settings()
@@ -82,11 +86,12 @@ async def on_startup() -> None:
         app.state.news_task = asyncio.create_task(NewsRunner(store, translator, bus, settings.request_timeout_seconds).run_forever())
         app.state.notification_task = asyncio.create_task(NotificationWorker(store, notification_service).run_forever())
         app.state.cleanup_task = asyncio.create_task(CleanupWorker(store).run_forever())
+        app.state.whale_task = asyncio.create_task(WhaleRunner(store, bus, settings.request_timeout_seconds).run_forever())
 
 
 @app.on_event("shutdown")
 async def on_shutdown() -> None:
-    for name in ("strategy_task", "news_task", "notification_task", "cleanup_task"):
+    for name in ("strategy_task", "news_task", "notification_task", "cleanup_task", "whale_task"):
         task = getattr(app.state, name, None)
         if task:
             task.cancel()
@@ -216,6 +221,22 @@ def get_whales() -> list[WhaleTargetOut]:
     return store.list_whale_targets()
 
 
+@app.post("/api/whales/resolve", response_model=WhaleAddressResolveResponse)
+def resolve_whale_address(payload: WhaleAddressResolveRequest, _: None = Depends(require_admin)) -> WhaleAddressResolveResponse:
+    return store.resolve_whale_addresses(payload.query)
+
+
+@app.put("/api/whales", response_model=WhaleTargetOut)
+def put_whale_target(payload: WhaleTargetUpsert, _: None = Depends(require_admin)) -> WhaleTargetOut:
+    return store.upsert_whale_target(payload)
+
+
+@app.delete("/api/whales/{target_id}")
+def delete_whale_target(target_id: str, _: None = Depends(require_admin)) -> dict[str, bool]:
+    store.delete_whale_target(target_id)
+    return {"ok": True}
+
+
 @app.get("/api/whales/{target_id}", response_model=WhaleDetailOut)
 def get_whale_detail(target_id: str) -> WhaleDetailOut:
     detail = store.get_whale_detail(target_id)
@@ -231,7 +252,7 @@ def get_klines(symbol: str, interval: str, limit: int = 80) -> list[KlineOut]:
     try:
         chart_module = next((module for module in store.list_modules() if module.id == "charts"), None)
         data_source = str((chart_module.config if chart_module else {}).get("data_source", "okx_then_binance"))
-        candles, source, source_role = market_router.fetch_klines(symbol.upper(), interval, min(max(limit, 20), 200), data_source)
+        candles, source, source_role = market_router.fetch_klines(symbol.upper(), interval, min(max(limit, 20), 1000), data_source)
     except DataSourceError as exc:
         store.record_source_error("market_data", "行情数据", str(exc))
         return []

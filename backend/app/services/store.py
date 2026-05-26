@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -13,13 +14,17 @@ from ..api.schemas import (
     SourceHealthOut,
     StrategyConfig,
     SymbolItem,
+    WhaleAddressCandidate,
+    WhaleAddressResolveResponse,
     WhaleDetailOut,
     WhaleTargetOut,
+    WhaleTargetUpsert,
 )
 from ..core.database import Database
 from ..core.security import decrypt_json, encrypt_json, mask_secret
 from ..core.text import content_fingerprint, is_probably_same_statement
 from ..core.time import utc_now_iso
+from .whale import extract_addresses, resolve_address_candidates
 
 
 def _json_loads(value: str, fallback):
@@ -41,6 +46,15 @@ def _chunks(items: list[int], size: int):
         yield items[index:index + size]
 
 
+def _should_store_secret(value: str) -> bool:
+    return bool(value and value != "********" and "..." not in value)
+
+
+def _slugify(value: str) -> str:
+    text = re.sub(r"[^a-zA-Z0-9\u4e00-\u9fff_-]+", "-", value.strip().lower()).strip("-")
+    return text[:64] or "whale-target"
+
+
 MODULE_LAYOUT_DEFAULTS: dict[str, dict[str, int]] = {
     "charts": {"x": 0, "y": 0, "w": 12, "h": 16},
     "whale": {"x": 0, "y": 16, "w": 12, "h": 8},
@@ -55,6 +69,8 @@ SOURCE_HEALTH_LABELS = {
     "whitehouse_gallery": "白宫 Gallery",
     "truthbrush_api": "Truthbrush",
     "trumps_truth_rss": "TrumpTruth RSS",
+    "hyperliquid": "Hyperliquid",
+    "debank": "DeBank",
 }
 
 
@@ -120,7 +136,8 @@ class Store:
                 config["api_key"] = mask_secret(str(secret.get("api_key") or ""))
             if row["id"] == "whale":
                 secret = decrypt_json(self.state_get("whale_secret") or "", self.db.secret_key)
-                config["api_key"] = mask_secret(str(secret.get("api_key") or ""))
+                for secret_key in ("debank_access_key", "etherscan_api_key", "api_key"):
+                    config[secret_key] = mask_secret(str(secret.get(secret_key) or ""))
             result.append(
                 StrategyConfig(
                     id=row["id"],
@@ -145,13 +162,22 @@ class Store:
         config = dict(config)
         if strategy_id == "translation":
             notifier_id = None
-        if strategy_id in {"translation", "whale"}:
-            key = f"{strategy_id}_secret"
+            key = "translation_secret"
             secret = decrypt_json(self.state_get(key) or "", self.db.secret_key)
             api_key = str(config.pop("api_key", "") or "")
-            if api_key and api_key != "********" and "..." not in api_key:
+            if _should_store_secret(api_key):
                 secret["api_key"] = api_key
                 self.state_set(key, encrypt_json(secret, self.db.secret_key))
+        if strategy_id == "whale":
+            key = "whale_secret"
+            secret = decrypt_json(self.state_get(key) or "", self.db.secret_key)
+            for secret_key in ("debank_access_key", "etherscan_api_key", "api_key"):
+                value = str(config.pop(secret_key, "") or "")
+                if _should_store_secret(value):
+                    secret[secret_key] = value
+            if "api_key" in secret and "debank_access_key" not in secret:
+                secret["debank_access_key"] = secret["api_key"]
+            self.state_set(key, encrypt_json(secret, self.db.secret_key))
         now = utc_now_iso()
         self.db.execute(
             "UPDATE strategy_configs SET enabled = ?, config_json = ?, updated_at = ? WHERE id = ?",
@@ -696,22 +722,189 @@ class Store:
             (key, value),
         )
 
+    def get_whale_secret(self) -> dict[str, Any]:
+        secret = decrypt_json(self.state_get("whale_secret") or "", self.db.secret_key)
+        if "api_key" in secret and "debank_access_key" not in secret:
+            secret["debank_access_key"] = secret["api_key"]
+        return secret
+
     def list_whale_targets(self) -> list[WhaleTargetOut]:
         rows = self.db.query("SELECT * FROM whale_targets ORDER BY updated_at DESC, label ASC")
-        return [
-            WhaleTargetOut(
-                id=row["id"],
-                label=row["label"],
-                address_or_subject=row["address_or_subject"],
-                enabled=bool(row["enabled"]),
-                config=_json_loads(row["config_json"], {}),
-                updated_at=row["updated_at"],
+        result: list[WhaleTargetOut] = []
+        for row in rows:
+            config = _json_loads(row["config_json"], {})
+            snapshot = self.get_whale_snapshot(str(row["id"]))
+            if snapshot:
+                config = {
+                    **config,
+                    **{
+                        key: snapshot.get(key)
+                        for key in (
+                            "positions",
+                            "holdings",
+                            "defi_positions",
+                            "open_orders",
+                            "fills",
+                            "historical_orders",
+                            "funding",
+                            "ledger_updates",
+                            "portfolio",
+                            "account_summary",
+                            "source_status",
+                        )
+                    },
+                }
+                config["last_snapshot_at"] = snapshot.get("updated_at")
+                account = snapshot.get("account_summary") if isinstance(snapshot.get("account_summary"), dict) else {}
+                config["current_operation_amount"] = account.get("contract_notional") or account.get("total_balance") or config.get("current_operation_amount")
+            result.append(
+                WhaleTargetOut(
+                    id=row["id"],
+                    label=row["label"],
+                    address_or_subject=row["address_or_subject"],
+                    enabled=bool(row["enabled"]),
+                    config=config,
+                    updated_at=row["updated_at"],
+                )
             )
-            for row in rows
+        return result
+
+    def upsert_whale_target(self, item: WhaleTargetUpsert) -> WhaleTargetOut:
+        config = dict(item.config or {})
+        addresses = list(dict.fromkeys([address.lower() for address in extract_addresses(item.address_or_subject)] + [str(address).lower() for address in config.get("addresses", []) if re.fullmatch(r"0x[a-fA-F0-9]{40}", str(address))]))
+        if addresses:
+            config["addresses"] = addresses
+        target_id = _slugify(item.id or (addresses[0] if addresses else item.label or item.address_or_subject))
+        now = utc_now_iso()
+        self.db.execute(
+            """
+            INSERT INTO whale_targets (id, label, address_or_subject, enabled, config_json, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                label = excluded.label,
+                address_or_subject = excluded.address_or_subject,
+                enabled = excluded.enabled,
+                config_json = excluded.config_json,
+                updated_at = excluded.updated_at
+            """,
+            (target_id, item.label.strip() or target_id, item.address_or_subject.strip(), int(item.enabled), json.dumps(config, ensure_ascii=False, sort_keys=True), now),
+        )
+        target = self.get_whale_target(target_id)
+        if target is None:
+            raise KeyError(target_id)
+        return target
+
+    def delete_whale_target(self, target_id: str) -> None:
+        self.db.execute("DELETE FROM whale_targets WHERE id = ?", (target_id,))
+        self.db.execute("DELETE FROM whale_snapshots WHERE target_id = ?", (target_id,))
+        self.db.execute("DELETE FROM whale_events WHERE target_id = ?", (target_id,))
+        self.db.execute("DELETE FROM app_state WHERE state_key LIKE ?", (f"whale:hyperliquid:fills:{target_id}:%",))
+
+    def get_whale_target(self, target_id: str) -> WhaleTargetOut | None:
+        return next((item for item in self.list_whale_targets() if item.id == target_id), None)
+
+    def resolve_whale_addresses(self, query: str) -> WhaleAddressResolveResponse:
+        targets = [
+            {
+                "id": item.id,
+                "label": item.label,
+                "address_or_subject": item.address_or_subject,
+                "config": item.config,
+            }
+            for item in self.list_whale_targets()
         ]
+        candidates = [WhaleAddressCandidate(**item) for item in resolve_address_candidates(query, targets)]
+        return WhaleAddressResolveResponse(query=query, candidates=candidates)
+
+    def get_whale_snapshot(self, target_id: str) -> dict[str, Any]:
+        row = self.db.query_one("SELECT * FROM whale_snapshots WHERE target_id = ?", (target_id,))
+        if row is None:
+            return {}
+        snapshot = _json_loads(row["snapshot_json"], {})
+        if isinstance(snapshot, dict):
+            snapshot["updated_at"] = row["updated_at"]
+            return snapshot
+        return {}
+
+    def save_whale_snapshot(self, target_id: str, snapshot: dict[str, Any]) -> None:
+        now = utc_now_iso()
+        self.db.execute(
+            """
+            INSERT INTO whale_snapshots (target_id, snapshot_json, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(target_id) DO UPDATE SET
+                snapshot_json = excluded.snapshot_json,
+                updated_at = excluded.updated_at
+            """,
+            (target_id, json.dumps(snapshot, ensure_ascii=False, sort_keys=True), now),
+        )
+
+    def add_whale_event(
+        self,
+        *,
+        provider: str,
+        target_id: str,
+        action_type: str,
+        summary: str,
+        payload: dict[str, Any],
+        occurred_at_utc: str | None = None,
+        event_key: str | None = None,
+        notification_required: bool = False,
+    ) -> int:
+        now = utc_now_iso()
+        cursor = self.db.execute(
+            """
+            INSERT OR IGNORE INTO whale_events (
+                provider, target_id, action_type, event_key, summary, payload_json,
+                occurred_at_utc, created_at, notification_required, notification_sent
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                provider,
+                target_id,
+                action_type,
+                event_key,
+                summary,
+                json.dumps(payload, ensure_ascii=False, sort_keys=True),
+                occurred_at_utc or now,
+                now,
+                int(notification_required),
+                0 if notification_required else 1,
+            ),
+        )
+        if cursor.rowcount == 0 and event_key:
+            existing = self.db.query_one("SELECT id FROM whale_events WHERE event_key = ?", (event_key,))
+            if existing:
+                return int(existing["id"])
+        return int(cursor.lastrowid)
+
+    def list_pending_whale_notifications(self):
+        return self.db.query(
+            """
+            SELECT whale_events.*, whale_targets.label AS target_label, whale_targets.address_or_subject, whale_targets.config_json AS target_config_json
+            FROM whale_events
+            LEFT JOIN whale_targets ON whale_events.target_id = whale_targets.id
+            WHERE whale_events.notification_required = 1 AND whale_events.notification_sent = 0
+            ORDER BY whale_events.occurred_at_utc ASC, whale_events.id ASC
+            LIMIT 30
+            """
+        )
+
+    def mark_whale_notification(self, event_id: int, *, ok: bool, error: str | None = None) -> None:
+        self.db.execute(
+            """
+            UPDATE whale_events
+            SET notification_sent = CASE WHEN ? THEN 1 ELSE notification_sent END,
+                notification_attempts = notification_attempts + 1,
+                last_notification_error = ?
+            WHERE id = ?
+            """,
+            (int(ok), None if ok else (error or "")[:1000], event_id),
+        )
 
     def get_whale_detail(self, target_id: str) -> WhaleDetailOut | None:
-        target = next((item for item in self.list_whale_targets() if item.id == target_id), None)
+        target = self.get_whale_target(target_id)
         if target is None:
             return None
         events = self.db.query(
@@ -735,9 +928,20 @@ class Store:
             for row in events
         ]
         config = target.config
+        snapshot = self.get_whale_snapshot(target_id)
         return WhaleDetailOut(
             target=target,
             recent_events=recent_events,
-            positions=list(config.get("positions", [])),
-            holdings=list(config.get("holdings", [])),
+            positions=list(snapshot.get("positions") or config.get("positions", [])),
+            holdings=list(snapshot.get("holdings") or config.get("holdings", [])),
+            defi_positions=list(snapshot.get("defi_positions") or config.get("defi_positions", [])),
+            open_orders=list(snapshot.get("open_orders") or config.get("open_orders", [])),
+            fills=list(snapshot.get("fills") or config.get("fills", [])),
+            historical_orders=list(snapshot.get("historical_orders") or config.get("historical_orders", [])),
+            funding=list(snapshot.get("funding") or config.get("funding", [])),
+            ledger_updates=list(snapshot.get("ledger_updates") or config.get("ledger_updates", [])),
+            portfolio=list(snapshot.get("portfolio") or config.get("portfolio", [])),
+            account_summary=dict(snapshot.get("account_summary") or config.get("account_summary", {})),
+            snapshot=snapshot,
+            updated_at=str(snapshot.get("updated_at")) if snapshot.get("updated_at") else None,
         )

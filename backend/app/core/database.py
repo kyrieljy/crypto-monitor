@@ -189,14 +189,46 @@ class Database:
                     provider TEXT NOT NULL,
                     target_id TEXT NOT NULL,
                     action_type TEXT NOT NULL,
+                    event_key TEXT,
                     summary TEXT NOT NULL,
                     payload_json TEXT NOT NULL,
                     occurred_at_utc TEXT NOT NULL,
-                    created_at TEXT NOT NULL
+                    created_at TEXT NOT NULL,
+                    notification_required INTEGER NOT NULL DEFAULT 0,
+                    notification_sent INTEGER NOT NULL DEFAULT 1,
+                    notification_attempts INTEGER NOT NULL DEFAULT 0,
+                    last_notification_error TEXT
+                );
+
+                CREATE TABLE IF NOT EXISTS whale_snapshots (
+                    target_id TEXT PRIMARY KEY,
+                    snapshot_json TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
                 );
                 """
             )
+            self._migrate_schema_columns()
             self.conn.commit()
+
+    def _migrate_schema_columns(self) -> None:
+        columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(whale_events)").fetchall()}
+        additions = {
+            "event_key": "ALTER TABLE whale_events ADD COLUMN event_key TEXT",
+            "notification_required": "ALTER TABLE whale_events ADD COLUMN notification_required INTEGER NOT NULL DEFAULT 0",
+            "notification_sent": "ALTER TABLE whale_events ADD COLUMN notification_sent INTEGER NOT NULL DEFAULT 1",
+            "notification_attempts": "ALTER TABLE whale_events ADD COLUMN notification_attempts INTEGER NOT NULL DEFAULT 0",
+            "last_notification_error": "ALTER TABLE whale_events ADD COLUMN last_notification_error TEXT",
+        }
+        for column, sql in additions.items():
+            if column not in columns:
+                self.conn.execute(sql)
+        self.conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_whale_events_event_key
+            ON whale_events(event_key)
+            WHERE event_key IS NOT NULL
+            """
+        )
 
     def seed_defaults(self) -> None:
         now = utc_now_iso()
@@ -330,9 +362,24 @@ class Database:
                 0,
                 {
                     "enabled": False,
-                    "provider": "",
-                    "base_url": "",
+                    "provider": "hyperliquid_debank",
+                    "hyperliquid_enabled": True,
+                    "hyperliquid_base_url": "https://api.hyperliquid.xyz",
+                    "debank_enabled": False,
+                    "debank_base_url": "https://pro-openapi.debank.com",
+                    "etherscan_enabled": False,
                     "poll_seconds": 300,
+                    "trade_monitor_enabled": True,
+                    "trade_notification_enabled": True,
+                    "trade_poll_seconds": 120,
+                    "extended_poll_seconds": 1800,
+                    "notify_large_trades": True,
+                    "trade_min_notional_usd": 100000,
+                    "trade_coin_thresholds": {"ETH": 100, "BTC": 5, "SOL": 10000},
+                    "initial_fill_sync_mode": "cursor_only",
+                    "position_change_alert_pct": 25,
+                    "min_position_value_usd": 10000,
+                    "liquidation_distance_pct": 5,
                     "targets": [{"label": "麻吉", "subject": "", "enabled": False}],
                 },
             ),
@@ -428,15 +475,19 @@ class Database:
         self.execute(
             """
             INSERT OR IGNORE INTO whale_targets (id, label, address_or_subject, enabled, config_json, updated_at)
-            VALUES ('machi', '麻吉大哥', '0x020c...5872', 1, ?, ?)
+            VALUES ('machi', '麻吉大哥', '0x020ca66c30bec2c4fe3861a94e4db4a498a35872', 1, ?, ?)
             """,
             (
                 json.dumps(
                     {
                         "tags": ["聪明钱", "重点关注"],
+                        "addresses": ["0x020ca66c30bec2c4fe3861a94e4db4a498a35872"],
+                        "source_url": "https://hyperdash.info/trader/0x020ca66c30bec2c4fe3861a94e4db4a498a35872",
                         "current_operation_amount": None,
                         "positions": [],
                         "holdings": [],
+                        "defi_positions": [],
+                        "open_orders": [],
                     },
                     ensure_ascii=False,
                 ),
@@ -475,6 +526,61 @@ class Database:
                     "UPDATE strategy_configs SET config_json = ?, updated_at = ? WHERE id = 'whitehouse'",
                     (json.dumps(config, ensure_ascii=False), now),
                 )
+
+        whale_row = self.query_one("SELECT config_json FROM strategy_configs WHERE id = 'whale'")
+        if whale_row is not None:
+            config = json.loads(whale_row["config_json"])
+            defaults = {
+                "provider": "hyperliquid_debank",
+                "hyperliquid_enabled": True,
+                "hyperliquid_base_url": "https://api.hyperliquid.xyz",
+                "debank_enabled": False,
+                "debank_base_url": "https://pro-openapi.debank.com",
+                "etherscan_enabled": False,
+                "poll_seconds": 300,
+                "trade_monitor_enabled": True,
+                "trade_notification_enabled": True,
+                "trade_poll_seconds": 120,
+                "extended_poll_seconds": 1800,
+                "notify_large_trades": True,
+                "trade_min_notional_usd": 100000,
+                "trade_coin_thresholds": {"ETH": 100, "BTC": 5, "SOL": 10000},
+                "initial_fill_sync_mode": "cursor_only",
+                "position_change_alert_pct": 25,
+                "min_position_value_usd": 10000,
+                "liquidation_distance_pct": 5,
+            }
+            changed = False
+            for key, value in defaults.items():
+                if key not in config:
+                    config[key] = value
+                    changed = True
+            for key, minimum in {"poll_seconds": 300, "trade_poll_seconds": 120, "extended_poll_seconds": 1800}.items():
+                try:
+                    current = int(config.get(key, 0))
+                except (TypeError, ValueError):
+                    current = 0
+                if current < minimum:
+                    config[key] = minimum
+                    changed = True
+            if changed:
+                self.execute(
+                    "UPDATE strategy_configs SET config_json = ?, updated_at = ? WHERE id = 'whale'",
+                    (json.dumps(config, ensure_ascii=False), now),
+                )
+
+        machi_address = "0x020ca66c30bec2c4fe3861a94e4db4a498a35872"
+        machi_source_url = f"https://hyperdash.info/trader/{machi_address}"
+        machi_row = self.query_one("SELECT address_or_subject, config_json FROM whale_targets WHERE id = 'machi'")
+        if machi_row is not None and str(machi_row["address_or_subject"]).strip().lower() == "0x020c...5872":
+            config = json.loads(machi_row["config_json"])
+            config["addresses"] = [machi_address]
+            if not config.get("source_url"):
+                config["source_url"] = machi_source_url
+            self.execute(
+                "UPDATE whale_targets SET address_or_subject = ?, config_json = ?, updated_at = ? WHERE id = 'machi'",
+                (machi_address, json.dumps(config, ensure_ascii=False), now),
+            )
 
     def _migrate_dashboard_module_defaults(self) -> None:
         charts_row = self.query_one("SELECT config_json FROM dashboard_modules WHERE id = 'charts'")

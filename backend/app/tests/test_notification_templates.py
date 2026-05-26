@@ -1,6 +1,100 @@
 import json
 
-from backend.app.services.notification_worker import format_alert_notification, format_news_notification
+import pytest
+
+from backend.app.services.notification_worker import format_alert_notification, format_news_notification, format_whale_notification
+
+
+@pytest.mark.parametrize(
+    ("direction", "direction_label", "price_label"),
+    [
+        ("Open Long", "买入开多", "开仓价格"),
+        ("Close Long", "卖出平多", "平仓价格"),
+        ("Open Short", "卖出开空", "开仓价格"),
+        ("Close Short", "买入平空", "平仓价格"),
+    ],
+)
+def test_whale_trade_notification_template(direction: str, direction_label: str, price_label: str) -> None:
+    row = {
+        "id": 1,
+        "provider": "hyperliquid",
+        "target_id": "smart-wallet",
+        "target_label": "Smart Wallet",
+        "address_or_subject": "0x2222222222222222222222222222222222222222",
+        "action_type": "trade_buy",
+        "payload_json": json.dumps(
+            {
+                "target_label": "Smart Wallet",
+                "address": "0x2222222222222222222222222222222222222222",
+                "is_large": True,
+                "hyperdash_url": "https://hyperdash.info/trader/0x2222222222222222222222222222222222222222",
+                "direction_label": direction_label,
+                "price_label": price_label,
+                "position_leverage": 25,
+                "position_margin_mode": "全仓",
+                "fill": {
+                    "coin": "ETH",
+                    "side": "买入",
+                    "direction": direction,
+                    "size": 0.5,
+                    "price": 2100,
+                    "notional": 1050,
+                    "fee": 0.4,
+                    "fee_token": "USDC",
+                },
+            },
+            ensure_ascii=False,
+        ),
+        "occurred_at_utc": "2026-05-25T22:00:00+00:00",
+    }
+
+    message = format_whale_notification(row)
+
+    assert message.startswith("[Hyperliquid成交提醒]")
+    assert "对象: Smart Wallet" in message
+    assert "币种: ETH" in message
+    assert f"仓位动作: {direction_label}" in message
+    assert f"{price_label}: $2,100.00" in message
+    assert "杠杆: 25x 全仓" in message
+    assert "成交额: $1,050" in message
+    assert "地址:" not in message
+    assert "链接:" not in message
+    assert "大额标记:" not in message
+
+
+def test_whale_trade_notification_template_handles_missing_leverage() -> None:
+    row = {
+        "id": 1,
+        "provider": "hyperliquid",
+        "target_id": "smart-wallet",
+        "target_label": "Smart Wallet",
+        "address_or_subject": "",
+        "action_type": "trade_buy",
+        "payload_json": json.dumps(
+            {
+                "target_label": "Smart Wallet",
+                "fill": {
+                    "coin": "ETH",
+                    "side": "买入",
+                    "direction": "Open Long",
+                    "size": 0.5,
+                    "price": 2100,
+                    "notional": 1050,
+                },
+            },
+            ensure_ascii=False,
+        ),
+        "occurred_at_utc": "2026-05-25T22:00:00+00:00",
+    }
+
+    message = format_whale_notification(row)
+
+    assert "仓位动作: 买入开多" in message
+    assert "开仓价格: $2,100.00" in message
+    assert "杠杆: --" in message
+import pytest
+
+from backend.app.services.notification_worker import format_alert_notification, format_news_notification, format_whale_notification
 
 
 def test_ma_notification_template_uses_robot_format() -> None:
@@ -108,3 +202,42 @@ def test_media_news_notification_uses_plain_text_and_preview_links() -> None:
     assert "媒体预览: https://static-assets.example/card.jpg" in message
     assert "<p>" not in message
     assert "<a " not in message
+
+
+def legacy_whale_trade_notification_template() -> None:
+    row = {
+        "id": 1,
+        "provider": "hyperliquid",
+        "target_id": "smart-wallet",
+        "target_label": "Smart Wallet",
+        "address_or_subject": "0x2222222222222222222222222222222222222222",
+        "action_type": "trade_buy",
+        "payload_json": json.dumps(
+            {
+                "target_label": "Smart Wallet",
+                "address": "0x2222222222222222222222222222222222222222",
+                "is_large": False,
+                "hyperdash_url": "https://hyperdash.info/trader/0x2222222222222222222222222222222222222222",
+                "fill": {
+                    "coin": "ETH",
+                    "side": "买入",
+                    "direction": "Open Long",
+                    "size": 0.5,
+                    "price": 2100,
+                    "notional": 1050,
+                    "fee": 0.4,
+                    "fee_token": "USDC",
+                },
+            },
+            ensure_ascii=False,
+        ),
+        "occurred_at_utc": "2026-05-25T22:00:00+00:00",
+    }
+
+    message = format_whale_notification(row)
+
+    assert message.startswith("[Hyperliquid成交提醒]")
+    assert "对象: Smart Wallet" in message
+    assert "方向: 买入 ETH" in message
+    assert "成交额: $1,050" in message
+    assert "大额标记: 否" in message
