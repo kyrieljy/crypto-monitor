@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import { createChart, type IChartApi, type UTCTimestamp } from "lightweight-charts";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../lib/api";
@@ -58,6 +58,9 @@ const BOLL_LINE_COLORS = {
   lower: "#22c55e"
 };
 
+type CandleSeriesApi = ReturnType<IChartApi["addCandlestickSeries"]>;
+type LineSeriesApi = ReturnType<IChartApi["addLineSeries"]>;
+
 export function CoinChart({
   symbol,
   interval = "15m",
@@ -70,23 +73,68 @@ export function CoinChart({
 }: CoinChartProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
+  const candleSeriesRef = useRef<CandleSeriesApi | null>(null);
+  const indicatorSeriesRef = useRef<LineSeriesApi[]>([]);
+  const visibleRangeRef = useRef<{ from: number; to: number } | null>(null);
+  const userChangedRangeRef = useRef(false);
+  const lastGoodDataRef = useRef<Kline[]>([]);
   const klineLimit = size === "large" ? 600 : 90;
+  const dataKey = `${symbol}:${interval}:${klineLimit}`;
+  const dataKeyRef = useRef(dataKey);
+  if (dataKeyRef.current !== dataKey) {
+    dataKeyRef.current = dataKey;
+    lastGoodDataRef.current = [];
+  }
+  const indicatorSettingsKey = useMemo(
+    () => [
+      indicatorSettings.maShortPeriod,
+      indicatorSettings.maFastPeriod,
+      indicatorSettings.maSlowPeriod,
+      indicatorSettings.bollPeriod,
+      indicatorSettings.bollStddev,
+      indicatorSettings.kdjPeriod,
+      indicatorSettings.kdjKSmoothing,
+      indicatorSettings.kdjDSmoothing
+    ].join(":"),
+    [
+      indicatorSettings.maShortPeriod,
+      indicatorSettings.maFastPeriod,
+      indicatorSettings.maSlowPeriod,
+      indicatorSettings.bollPeriod,
+      indicatorSettings.bollStddev,
+      indicatorSettings.kdjPeriod,
+      indicatorSettings.kdjKSmoothing,
+      indicatorSettings.kdjDSmoothing
+    ]
+  );
   const { data, isLoading, isError } = useQuery({
     queryKey: ["klines", symbol, interval, klineLimit],
     queryFn: () => api.klines(symbol, interval, klineLimit),
     refetchInterval: 60_000
   });
+  if (data?.length) {
+    lastGoodDataRef.current = data;
+  }
+  const chartRows = data?.length ? data : lastGoodDataRef.current;
+  const hasChartRows = chartRows.length > 0;
+  const isUsingStaleRows = hasChartRows && !data?.length && !isLoading;
 
   useEffect(() => {
-    if (!containerRef.current || !data?.length) return;
-    containerRef.current.innerHTML = "";
+    visibleRangeRef.current = null;
+    userChangedRangeRef.current = false;
+  }, [symbol, interval, size]);
+
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+    container.innerHTML = "";
     const chartHeight = size === "large" ? 404 : 138;
     const hasKdjPane = showIndicators && indicatorMode === "kdj";
-    const chart = createChart(containerRef.current, {
-      width: containerRef.current.clientWidth,
+    const chart = createChart(container, {
+      width: container.clientWidth,
       height: chartHeight,
       handleScroll: {
-        mouseWheel: true,
+        mouseWheel: false,
         pressedMouseMove: true,
         horzTouchDrag: true,
         vertTouchDrag: false
@@ -118,7 +166,6 @@ export function CoinChart({
         fixRightEdge: false
       }
     });
-    const candleData = data.map((item) => ({ ...item, time: item.time as UTCTimestamp }));
     const series = chart.addCandlestickSeries({
       upColor: "#22c55e",
       downColor: "#ef4444",
@@ -126,11 +173,52 @@ export function CoinChart({
       wickUpColor: "#22c55e",
       wickDownColor: "#ef4444"
     });
+    chartRef.current = chart;
+    candleSeriesRef.current = series;
+    const rememberRange = (range: { from: number; to: number } | null) => {
+      if (range) visibleRangeRef.current = { from: Number(range.from), to: Number(range.to) };
+    };
+    const markUserRange = () => {
+      userChangedRangeRef.current = true;
+    };
+    const blockPageWheel = (event: WheelEvent) => {
+      if (size === "large") event.preventDefault();
+      markUserRange();
+    };
+    const resize = () => chart.applyOptions({ width: container.clientWidth || 260 });
+    const resizeObserver = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(resize);
+    chart.timeScale().subscribeVisibleLogicalRangeChange(rememberRange);
+    container.addEventListener("wheel", blockPageWheel, { passive: false });
+    container.addEventListener("mousedown", markUserRange);
+    container.addEventListener("touchstart", markUserRange, { passive: true });
+    resizeObserver?.observe(container);
+    window.addEventListener("resize", resize);
+    return () => {
+      chart.timeScale().unsubscribeVisibleLogicalRangeChange(rememberRange);
+      container.removeEventListener("wheel", blockPageWheel);
+      container.removeEventListener("mousedown", markUserRange);
+      container.removeEventListener("touchstart", markUserRange);
+      resizeObserver?.disconnect();
+      window.removeEventListener("resize", resize);
+      chart.remove();
+      chartRef.current = null;
+      candleSeriesRef.current = null;
+      indicatorSeriesRef.current = [];
+    };
+  }, [size, showIndicators, indicatorMode]);
+
+  useEffect(() => {
+    const chart = chartRef.current;
+    const series = candleSeriesRef.current;
+    if (!chart || !series || !hasChartRows) return;
+    const candleData = chartRows.map((item) => ({ ...item, time: item.time as UTCTimestamp }));
     series.setData(candleData);
-    if (showIndicators) {
-      addIndicatorLines(chart, data, indicatorSettings, indicatorMode);
-    }
-    if (size === "large" && candleData.length > 160) {
+    indicatorSeriesRef.current.forEach((line) => chart.removeSeries(line));
+    indicatorSeriesRef.current = showIndicators ? addIndicatorLines(chart, chartRows, indicatorSettings, indicatorMode) : [];
+    const savedRange = visibleRangeRef.current;
+    if (userChangedRangeRef.current && savedRange) {
+      chart.timeScale().setVisibleLogicalRange(savedRange);
+    } else if (size === "large" && candleData.length > 160) {
       chart.timeScale().setVisibleLogicalRange({
         from: Math.max(0, candleData.length - 140),
         to: candleData.length + 4
@@ -138,17 +226,9 @@ export function CoinChart({
     } else {
       chart.timeScale().fitContent();
     }
-    chartRef.current = chart;
-    const resize = () => chart.applyOptions({ width: containerRef.current?.clientWidth ?? 260 });
-    window.addEventListener("resize", resize);
-    return () => {
-      window.removeEventListener("resize", resize);
-      chart.remove();
-      chartRef.current = null;
-    };
-  }, [data, size, showIndicators, indicatorSettings, indicatorMode]);
+  }, [chartRows, hasChartRows, size, showIndicators, indicatorMode, indicatorSettings, indicatorSettingsKey]);
 
-  const latest = data?.[data.length - 1];
+  const latest = chartRows[chartRows.length - 1];
   const change = latest ? ((latest.close - latest.open) / latest.open) * 100 : null;
 
   useEffect(() => {
@@ -206,29 +286,49 @@ export function CoinChart({
   );
 }
 
-function addIndicatorLines(chart: IChartApi, rows: Kline[], settings: IndicatorSettings, mode: IndicatorMode) {
+function addIndicatorLines(chart: IChartApi, rows: Kline[], settings: IndicatorSettings, mode: IndicatorMode): LineSeriesApi[] {
   const maShort = sma(rows, settings.maShortPeriod);
   const maFast = sma(rows, settings.maFastPeriod);
   const maSlow = sma(rows, settings.maSlowPeriod);
   const bands = boll(rows, settings.bollPeriod, settings.bollStddev);
   const kdj = calcKdj(rows, settings.kdjPeriod, settings.kdjKSmoothing, settings.kdjDSmoothing);
+  const lines: LineSeriesApi[] = [];
 
   if (mode === "ma") {
-    chart.addLineSeries({ color: MA_LINE_COLORS.short, lineWidth: 1, priceLineVisible: false, lastValueVisible: false }).setData(maShort);
-    chart.addLineSeries({ color: MA_LINE_COLORS.fast, lineWidth: 1, priceLineVisible: false, lastValueVisible: false }).setData(maFast);
-    chart.addLineSeries({ color: MA_LINE_COLORS.slow, lineWidth: 1, priceLineVisible: false, lastValueVisible: false }).setData(maSlow);
+    const short = chart.addLineSeries({ color: MA_LINE_COLORS.short, lineWidth: 1, priceLineVisible: false, lastValueVisible: false });
+    short.setData(maShort);
+    lines.push(short);
+    const fast = chart.addLineSeries({ color: MA_LINE_COLORS.fast, lineWidth: 1, priceLineVisible: false, lastValueVisible: false });
+    fast.setData(maFast);
+    lines.push(fast);
+    const slow = chart.addLineSeries({ color: MA_LINE_COLORS.slow, lineWidth: 1, priceLineVisible: false, lastValueVisible: false });
+    slow.setData(maSlow);
+    lines.push(slow);
   }
   if (mode === "boll") {
-    chart.addLineSeries({ color: BOLL_LINE_COLORS.upper, lineWidth: 1, priceLineVisible: false, lastValueVisible: false }).setData(bands.upper);
-    chart.addLineSeries({ color: BOLL_LINE_COLORS.middle, lineWidth: 1, priceLineVisible: false, lastValueVisible: false }).setData(bands.middle);
-    chart.addLineSeries({ color: BOLL_LINE_COLORS.lower, lineWidth: 1, priceLineVisible: false, lastValueVisible: false }).setData(bands.lower);
+    const upper = chart.addLineSeries({ color: BOLL_LINE_COLORS.upper, lineWidth: 1, priceLineVisible: false, lastValueVisible: false });
+    upper.setData(bands.upper);
+    lines.push(upper);
+    const middle = chart.addLineSeries({ color: BOLL_LINE_COLORS.middle, lineWidth: 1, priceLineVisible: false, lastValueVisible: false });
+    middle.setData(bands.middle);
+    lines.push(middle);
+    const lower = chart.addLineSeries({ color: BOLL_LINE_COLORS.lower, lineWidth: 1, priceLineVisible: false, lastValueVisible: false });
+    lower.setData(bands.lower);
+    lines.push(lower);
   }
   if (mode === "kdj") {
     chart.priceScale("kdj").applyOptions({ visible: false, scaleMargins: { top: 0.76, bottom: 0.02 } });
-    chart.addLineSeries({ color: "#22c55e", lineWidth: 1, priceLineVisible: false, lastValueVisible: false, priceScaleId: "kdj" }).setData(kdj.k);
-    chart.addLineSeries({ color: "#60a5fa", lineWidth: 1, priceLineVisible: false, lastValueVisible: false, priceScaleId: "kdj" }).setData(kdj.d);
-    chart.addLineSeries({ color: "#f87171", lineWidth: 1, priceLineVisible: false, lastValueVisible: false, priceScaleId: "kdj" }).setData(kdj.j);
+    const k = chart.addLineSeries({ color: "#22c55e", lineWidth: 1, priceLineVisible: false, lastValueVisible: false, priceScaleId: "kdj" });
+    k.setData(kdj.k);
+    lines.push(k);
+    const d = chart.addLineSeries({ color: "#60a5fa", lineWidth: 1, priceLineVisible: false, lastValueVisible: false, priceScaleId: "kdj" });
+    d.setData(kdj.d);
+    lines.push(d);
+    const j = chart.addLineSeries({ color: "#f87171", lineWidth: 1, priceLineVisible: false, lastValueVisible: false, priceScaleId: "kdj" });
+    j.setData(kdj.j);
+    lines.push(j);
   }
+  return lines;
 }
 
 function indicatorLegendLines(mode: IndicatorMode, settings: IndicatorSettings) {

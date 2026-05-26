@@ -304,6 +304,15 @@ if frontend_dist.exists():
     app.mount("/assets", StaticFiles(directory=frontend_dist / "assets"), name="assets")
 
 
+def _frontend_file_response(path: Path) -> FileResponse:
+    response = FileResponse(path)
+    if path.name == "index.html":
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+    return response
+
+
 @app.get("/{path:path}")
 def serve_frontend(path: str):
     if path.startswith("api/"):
@@ -311,7 +320,7 @@ def serve_frontend(path: str):
     index = frontend_dist / "index.html"
     target = frontend_dist / path
     if target.exists() and target.is_file():
-        return FileResponse(target)
+        return _frontend_file_response(target)
     if index.exists():
-        return FileResponse(index)
+        return _frontend_file_response(index)
     return {"message": "前端尚未构建，请在 frontend 目录运行 npm run build。"}
