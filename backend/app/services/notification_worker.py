@@ -1,0 +1,221 @@
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import re
+from datetime import datetime, timedelta, timezone
+from html import unescape
+from typing import Any
+
+from .notifiers import NotificationService
+from .store import Store
+
+
+LOGGER = logging.getLogger("market_monitor.notifications")
+CST = timezone(timedelta(hours=8), "CST")
+
+
+def _format_cst(value: Any) -> str:
+    if value is None or value == "":
+        return "--"
+    try:
+        if isinstance(value, (int, float)):
+            dt = datetime.fromtimestamp(float(value) / 1000, tz=timezone.utc)
+        else:
+            raw = str(value).strip().replace("Z", "+00:00")
+            dt = datetime.fromisoformat(raw)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(CST).strftime("%Y-%m-%d %H:%M:%S CST")
+    except Exception:  # noqa: BLE001
+        return str(value)
+
+
+def _format_number(value: Any, digits: int = 4) -> str:
+    try:
+        return f"{float(value):.{digits}f}"
+    except Exception:  # noqa: BLE001
+        return "--"
+
+
+def _plain_text(value: Any) -> str:
+    text = unescape(re.sub(r"<[^>]+>", " ", str(value or "")))
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _source_label(source_role: Any, source: Any) -> str:
+    role = str(source_role or "").upper()
+    label = {
+        "PRIMARY": "主源",
+        "BACKUP": "灾备",
+        "FALLBACK": "灾备",
+    }.get(role, role or "未知")
+    return f"{label} ({source or '--'})"
+
+
+def _detail(row: Any) -> dict[str, Any]:
+    raw = row["detail_json"] if row["detail_json"] else "{}"
+    try:
+        return json.loads(raw)
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def _content_kind_label(kind: Any) -> str:
+    return {
+        "image": "图片",
+        "video": "视频",
+        "repost": "转发",
+        "link": "链接",
+        "media": "媒体",
+        "text": "文字",
+    }.get(str(kind or "text"), "文字")
+
+
+def _first_media_url(metadata: dict[str, Any]) -> str:
+    media = metadata.get("media")
+    if isinstance(media, list):
+        for item in media:
+            if isinstance(item, dict):
+                url = str(item.get("url") or item.get("thumbnail_url") or "").strip()
+                if url:
+                    return url
+    card = metadata.get("card")
+    if isinstance(card, dict):
+        return str(card.get("image_url") or "").strip()
+    return ""
+
+
+def format_alert_notification(row: Any, strategy_config: dict[str, Any] | None = None) -> str:
+    strategy_id = str(row["strategy_id"])
+    detail = _detail(row)
+    config = strategy_config or {}
+    common = [
+        f"标的: {row['symbol']}",
+        f"周期: {row['interval']}",
+    ]
+
+    if strategy_id == "ma":
+        fast_period = int(config.get("fast_period", 25))
+        slow_period = int(config.get("slow_period", 99))
+        direction = "上穿" if row["signal"] == "MA_CROSS_ABOVE" else "下穿"
+        lines = [
+            "[MA预警]",
+            *common,
+            f"信号: MA{fast_period}{direction}MA{slow_period}",
+            f"收盘价: {_format_number(row['close_price'])}",
+            f"快线MA: {_format_number(detail.get('fast_ma'))}",
+            f"慢线MA: {_format_number(detail.get('slow_ma'))}",
+        ]
+    elif strategy_id == "kdj":
+        signal = "J上穿K" if row["signal"] == "J_CROSS_ABOVE_K" else "J下穿K"
+        lines = [
+            "[KDJ预警]",
+            *common,
+            f"信号: {signal}",
+            f"收盘价: {_format_number(row['close_price'])}",
+            f"K: {_format_number(detail.get('K'))}",
+            f"D: {_format_number(detail.get('D'))}",
+            f"J: {_format_number(detail.get('J'))}",
+        ]
+    elif strategy_id == "boll":
+        signal = "收盘价上穿BOLL上轨" if row["signal"] == "BOLL_CROSS_ABOVE_UPPER" else "收盘价下穿BOLL下轨"
+        lines = [
+            "[BOLL预警]",
+            *common,
+            f"信号: {signal}",
+            f"收盘价: {_format_number(row['close_price'])}",
+            f"BOLL上轨: {_format_number(detail.get('upper'))}",
+            f"BOLL中轨: {_format_number(detail.get('middle'))}",
+            f"BOLL下轨: {_format_number(detail.get('lower'))}",
+        ]
+    else:
+        lines = [
+            f"[{strategy_id.upper()}预警]",
+            *common,
+            f"信号: {row['signal']}",
+            f"收盘价: {_format_number(row['close_price'])}",
+        ]
+
+    lines.extend(
+        [
+            f"数据源: {_source_label(row['source_role'], row['source'])}",
+            f"提醒时间: {_format_cst(row['created_at'])}",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def format_news_notification(row: Any) -> tuple[str, str]:
+    metadata = json.loads(row["metadata_json"] or "{}")
+    raw_categories = metadata.get("categories", [])
+    if isinstance(raw_categories, list):
+        categories = ", ".join(str(item) for item in raw_categories if str(item).strip()) or "未分类"
+    else:
+        categories = str(raw_categories or "未分类")
+
+    title = _plain_text(row["translated_title"] or row["title"] or "--")
+    summary = _plain_text(row["translated_summary"] or row["content"] or "--")
+    content_kind = _content_kind_label(metadata.get("content_kind"))
+    original_url = str(metadata.get("original_url") or "").strip()
+    media_url = _first_media_url(metadata)
+    card = metadata.get("card")
+    strategy_id = "whitehouse" if row["source_name"] == "whitehouse_gallery" else "trump_social"
+    module_title = "白宫发言新闻" if strategy_id == "whitehouse" else "特朗普言论监控"
+    lines = [
+        f"[更新] {module_title}",
+        f"时间: {_format_cst(row['published_at_utc'])}",
+        f"来源: {row['source_type']} / {row['source_name']}",
+        f"分类: {categories}",
+        f"类型: {content_kind}",
+        f"标题: {title}",
+        f"人物: {row['speaker'] or '--'}",
+        f"摘要: {summary}",
+        f"链接: {row['url'] or '--'}",
+    ]
+    if original_url and original_url != row["url"]:
+        lines.append(f"原帖: {original_url}")
+    if isinstance(card, dict) and card.get("url"):
+        card_title = _plain_text(card.get("title") or card.get("url"))
+        lines.append(f"卡片: {card_title} ({card.get('url')})")
+    if media_url:
+        lines.append(f"媒体预览: {media_url}")
+    message = "\n".join(lines)
+    return strategy_id, message
+
+
+class NotificationWorker:
+    def __init__(self, store: Store, notification_service: NotificationService) -> None:
+        self.store = store
+        self.notification_service = notification_service
+
+    async def run_forever(self) -> None:
+        while True:
+            try:
+                await asyncio.to_thread(self.run_once)
+            except Exception:  # noqa: BLE001
+                LOGGER.exception("通知重试轮询失败")
+            await asyncio.sleep(15)
+
+    def run_once(self) -> None:
+        for row in self.store.list_pending_alert_notifications():
+            try:
+                strategy = self.store.get_strategy(row["strategy_id"])
+                notification_text = format_alert_notification(row, strategy.config if strategy else None)
+                ok, dry_run, message = self.notification_service.send_strategy_message(row["strategy_id"], notification_text)
+                self.store.mark_alert_notification(int(row["id"]), ok=ok, error=None if ok else message)
+                LOGGER.info("告警通知处理 id=%s ok=%s dry_run=%s message=%s", row["id"], ok, dry_run, message)
+            except Exception as exc:  # noqa: BLE001
+                self.store.mark_alert_notification(int(row["id"]), ok=False, error=str(exc))
+                LOGGER.exception("告警通知失败 id=%s", row["id"])
+
+        for row in self.store.list_pending_news_notifications():
+            try:
+                strategy_id, message = format_news_notification(row)
+                ok, dry_run, result_message = self.notification_service.send_strategy_message(strategy_id, message)
+                self.store.mark_news_notification(int(row["id"]), ok=ok, error=None if ok else result_message)
+                LOGGER.info("新闻通知处理 id=%s ok=%s dry_run=%s", row["id"], ok, dry_run)
+            except Exception as exc:  # noqa: BLE001
+                self.store.mark_news_notification(int(row["id"]), ok=False, error=str(exc))
+                LOGGER.exception("新闻通知失败 id=%s", row["id"])
