@@ -32,6 +32,7 @@ def test_whale_trade_notification_template(direction: str, direction_label: str,
                 "price_label": price_label,
                 "position_leverage": 25,
                 "position_margin_mode": "全仓",
+                "current_position_label": "6800 ETH 多",
                 "fill": {
                     "coin": "ETH",
                     "side": "买入",
@@ -54,6 +55,7 @@ def test_whale_trade_notification_template(direction: str, direction_label: str,
     assert "对象: Smart Wallet" in message
     assert "币种: ETH" in message
     assert f"仓位动作: {direction_label}" in message
+    assert "当前仓位: 6800 ETH 多" in message
     assert f"{price_label}: $2,100.00" in message
     assert "杠杆: 25x 全仓" in message
     assert "成交额: $1,050" in message

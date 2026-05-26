@@ -1110,9 +1110,26 @@ function isTranslationInstructionText(value: string) {
     return true;
   }
   return (
+    /无法翻译/.test(value) ||
+    /无法处理[：:]/.test(value) ||
+    /需要提供.*英文新闻标题或摘要/.test(value) ||
+    /未提供.*英文新闻标题或摘要/.test(value) ||
+    /未提供.*需要翻译/.test(value) ||
+    /未提供.*英文文本/.test(value) ||
+    /请.*提供.*英文新闻标题或摘要/.test(value) ||
     /请提供.*英文新闻标题或摘要/.test(value) ||
+    /请提供.*需要翻译的内容/.test(value) ||
+    /请提供.*需要翻译的英文文本/.test(value) ||
+    /请提供.*英文文本/.test(value) ||
+    /无法访问外部链接/.test(value) ||
+    /链接是.*帖子/.test(value) ||
+    /作为\s*AI.*无法访问/.test(value) ||
+    /不是.*英文新闻标题或摘要/.test(value) ||
+    /重新提供.*英文内容/.test(value) ||
+    /英文内容.*以便翻译/.test(value) ||
     /未包含任何需要翻译/.test(value) ||
     /没有.*可翻译的内容/.test(value) ||
+    /并非仅链接/.test(value) ||
     /无法查看图片/.test(value) ||
     /当前信息仅包含日期/.test(value) ||
     /目前只输入了|目前仅看到日期信息/.test(value)
@@ -1234,7 +1251,9 @@ function isNonTextRepostPlaceholder(value: string) {
 }
 
 function isUrlOnlyText(value: string) {
-  return /^https?:\/\/\S+$/.test(value.trim());
+  const text = value.trim();
+  if (/^https?:\/\/\S+$/.test(text)) return true;
+  return /^(?:https?:\/\/)?(?:[\w-]+\.)+[a-z]{2,}\/\S+$/i.test(text.replace(/\s+/g, ""));
 }
 
 function alertSourceLabel(alert: AlertEvent) {
@@ -1468,7 +1487,15 @@ function WhaleDetailPage({ targetId, onBack }: { targetId: string; onBack: () =>
       {tab === "events" && (
         <Panel title="操作动态" dragHandle={false}>
           <div className="records">
-            {data.recent_events.map((event) => <span key={String(event.id)}>{cnDate(event.occurred_at_utc)} · {String(event.summary)}</span>)}
+            {data.recent_events.map((event) => {
+              const currentPosition = whaleEventCurrentPosition(event);
+              return (
+                <span key={String(event.id)}>
+                  {cnDate(event.occurred_at_utc)} · {String(event.summary)}
+                  {currentPosition ? ` · 当前仓位: ${currentPosition}` : ""}
+                </span>
+              );
+            })}
             {!data.recent_events.length && <span className="empty">暂无操作动态</span>}
           </div>
         </Panel>
@@ -1608,6 +1635,23 @@ function cnDateFromAny(value: unknown) {
   const asNumber = Number(value);
   if (Number.isFinite(asNumber) && String(value).length >= 10) return cnDate(new Date(asNumber).toISOString());
   return cnDate(String(value));
+}
+
+function whaleEventCurrentPosition(event: Record<string, any>) {
+  const payload = event.payload && typeof event.payload === "object" ? event.payload : {};
+  const label = typeof payload.current_position_label === "string" ? payload.current_position_label.trim() : "";
+  if (label) return label;
+  const position = payload.position && typeof payload.position === "object" ? payload.position : null;
+  if (!position) return "";
+  const coin = String(position.coin ?? position.symbol ?? "").split("-", 1)[0] || "--";
+  if (event.action_type === "close_position") return `0 ${coin}`;
+  const signedSize = Number(position.signed_size);
+  if (Number.isFinite(signedSize)) return signedSize === 0 ? `0 ${coin}` : `${Math.abs(signedSize).toLocaleString("zh-CN")} ${coin} ${signedSize > 0 ? "多" : "空"}`;
+  const size = Number(position.size);
+  if (!Number.isFinite(size) || size <= 0) return "";
+  const side = String(position.side ?? "");
+  const sideLabel = side.includes("空") ? "空" : side.includes("多") ? "多" : side;
+  return `${size.toLocaleString("zh-CN")} ${coin} ${sideLabel}`.trim();
 }
 
 function money(value: unknown, options: { showZero?: boolean } = {}) {

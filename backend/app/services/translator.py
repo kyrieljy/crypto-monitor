@@ -4,6 +4,7 @@ import json
 import logging
 import re
 from copy import deepcopy
+from html import unescape
 from urllib import request
 
 from ..core.security import decrypt_json
@@ -59,7 +60,10 @@ class Translator:
             choices = response_payload.get("choices") or []
             if not choices:
                 return text
-            return str(choices[0]["message"]["content"]).strip() or text
+            translated = str(choices[0]["message"]["content"]).strip()
+            if not translated or _is_unusable_translation_output(translated):
+                return text
+            return translated
         except Exception as exc:  # noqa: BLE001
             LOGGER.warning("大模型翻译失败，使用原文。error=%s", exc)
             return text
@@ -91,12 +95,60 @@ class Translator:
 
 
 def _should_skip_translation(text: str) -> bool:
-    value = text.strip()
+    value = _visible_translation_text(text)
+    if not value:
+        return True
     if re.fullmatch(r"https?://\S+", value):
+        return True
+    compact_value = re.sub(r"\s+", "", value)
+    if re.fullmatch(r"(?:https?://)?(?:[\w-]+\.)+[a-z]{2,}/\S+", compact_value, flags=re.IGNORECASE):
+        return True
+    without_links = re.sub(r"https?://\S+", "", value, flags=re.IGNORECASE)
+    without_links = re.sub(r"https?:\s*/\s*/\s*", "", without_links, flags=re.IGNORECASE)
+    without_links = re.sub(r"\b(?:[\w-]+\.)+[a-z]{2,}(?:/\S*)?", "", without_links, flags=re.IGNORECASE)
+    if not re.sub(r"[\W_]+", "", without_links):
         return True
     chinese_count = len(re.findall(r"[\u3400-\u9fff]", value))
     latin_count = len(re.findall(r"[A-Za-z]", value))
     return chinese_count >= 2 and chinese_count >= latin_count
+
+
+def _is_unusable_translation_output(text: str) -> bool:
+    value = re.sub(r"\s+", " ", text.strip())
+    if not value:
+        return True
+    patterns = (
+        r"无法翻译",
+        r"无法处理[：:]",
+        r"需要提供.*英文新闻标题或摘要",
+        r"未提供.*英文新闻标题或摘要",
+        r"未提供.*需要翻译",
+        r"未提供.*英文文本",
+        r"请.*提供.*英文新闻标题或摘要",
+        r"请提供.*英文新闻标题或摘要",
+        r"请提供.*需要翻译的内容",
+        r"请提供.*需要翻译的英文文本",
+        r"请提供.*英文文本",
+        r"无法访问外部链接",
+        r"链接是.*帖子",
+        r"作为\s*AI.*无法访问",
+        r"不是.*英文新闻标题或摘要",
+        r"重新提供.*英文内容",
+        r"英文内容.*以便翻译",
+        r"未包含任何需要翻译",
+        r"没有.*可翻译的内容",
+        r"并非仅链接",
+        r"无法查看图片",
+        r"当前信息仅包含日期",
+        r"目前只输入了",
+        r"目前仅看到日期信息",
+    )
+    return any(re.search(pattern, value) for pattern in patterns)
+
+
+def _visible_translation_text(text: str) -> str:
+    value = re.sub(r"<[^>]+>", " ", text.strip())
+    return re.sub(r"\s+", " ", unescape(value)).strip()
 
 
 def _same_plain_text(left: str, right: str) -> bool:

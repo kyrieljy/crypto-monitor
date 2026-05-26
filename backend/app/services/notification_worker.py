@@ -263,6 +263,7 @@ def format_whale_notification(row: Any) -> str:
         f"币种: {coin}",
         f"仓位动作: {_whale_direction_label(fill, payload)}",
         f"数量: {_format_amount(fill.get('size'))} {coin}",
+        f"当前仓位: {payload.get('current_position_label') or '--'}",
         f"{price_label}: {_format_money(fill.get('price'))}",
         f"杠杆: {_format_leverage(payload.get('position_leverage'), payload.get('position_margin_mode'))}",
         f"成交额: {_format_money(fill.get('notional'), 0)}",

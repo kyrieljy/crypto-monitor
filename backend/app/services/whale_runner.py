@@ -246,7 +246,7 @@ class WhaleRunner:
                     target_id=target_id,
                     action_type="open_position",
                     summary=f"{position.get('symbol')} 新增{position.get('side')}仓位 ${notional:,.0f}",
-                    payload={"position": position},
+                    payload={"position": position, "current_position_label": _position_label(position)},
                 )
                 continue
             old_notional = abs(_float(old.get("notional")))
@@ -258,7 +258,7 @@ class WhaleRunner:
                         target_id=target_id,
                         action_type="position_change",
                         summary=f"{position.get('symbol')} 仓位变化 {change_pct:.1f}%",
-                        payload={"old": old, "position": position, "change_pct": change_pct},
+                        payload={"old": old, "position": position, "change_pct": change_pct, "current_position_label": _position_label(position)},
                     )
             distance = position.get("liquidation_distance_pct")
             old_distance = old.get("liquidation_distance_pct") if isinstance(old, dict) else None
@@ -268,7 +268,7 @@ class WhaleRunner:
                     target_id=target_id,
                     action_type="liquidation_risk",
                     summary=f"{position.get('symbol')} 强平距离 {float(distance):.2f}%",
-                    payload={"position": position},
+                    payload={"position": position, "current_position_label": _position_label(position)},
                 )
         for key, position in old_positions.items():
             if key not in new_positions and abs(_float(position.get("notional"))) >= min_value:
@@ -277,7 +277,7 @@ class WhaleRunner:
                     target_id=target_id,
                     action_type="close_position",
                     summary=f"{position.get('symbol')} 已平{position.get('side')}仓位",
-                    payload={"position": position},
+                    payload={"position": position, "current_position_label": _position_size_label(0, position.get("coin") or position.get("symbol"))},
                 )
 
 
@@ -298,6 +298,14 @@ def _fill_event_context(fill: dict[str, Any], current_positions: list[dict[str, 
         "direction_label": str(fill.get("direction_label") or _direction_label(fill)),
         "price_label": str(fill.get("price_label") or _price_label(fill)),
     }
+    current_position_size = _current_position_after_fill(fill)
+    if current_position_size is not None:
+        context["current_position_size"] = current_position_size
+        context["current_position_label"] = _position_size_label(current_position_size, fill.get("coin") or fill.get("symbol"))
+    elif position:
+        position_label = _position_label(position)
+        if position_label:
+            context["current_position_label"] = position_label
     if position:
         context["position_leverage"] = position.get("leverage")
         context["position_margin_mode"] = position.get("margin_mode")
@@ -342,6 +350,43 @@ def _price_label(fill: dict[str, Any]) -> str:
     if "open" in normalized:
         return "开仓价格"
     return "成交价格"
+
+
+def _current_position_after_fill(fill: dict[str, Any]) -> float | None:
+    raw = fill.get("raw") if isinstance(fill.get("raw"), dict) else {}
+    start_value = raw.get("startPosition", fill.get("start_position"))
+    if start_value in (None, ""):
+        return None
+    start = _float(start_value)
+    size = abs(_float(fill.get("size")))
+    side_code = str(fill.get("side_code") or raw.get("side") or "").upper()
+    direction = str(fill.get("direction") or raw.get("dir") or "").strip().lower().replace("_", " ")
+    if side_code == "B" or "open long" in direction or "close short" in direction:
+        return start + size
+    if side_code in {"A", "S"} or "open short" in direction or "close long" in direction:
+        return start - size
+    return None
+
+
+def _position_size_label(size: float, coin_value: Any) -> str:
+    coin = _coin_key(coin_value) or str(coin_value or "").upper() or "--"
+    if abs(size) < 1e-12:
+        return f"0 {coin}"
+    side = "多" if size > 0 else "空"
+    return f"{abs(size):g} {coin} {side}"
+
+
+def _position_label(position: dict[str, Any]) -> str:
+    coin = _coin_key(position.get("coin") or position.get("symbol"))
+    signed_size = position.get("signed_size")
+    if signed_size not in (None, ""):
+        return _position_size_label(_float(signed_size), coin)
+    size = _float(position.get("size"))
+    if size <= 0:
+        return ""
+    side = str(position.get("side") or "").strip()
+    side_label = "空" if "空" in side or side.lower() == "short" else "多" if "多" in side or side.lower() == "long" else side
+    return f"{size:g} {coin or '--'} {side_label}".strip()
 
 
 def _float(value: Any, fallback: float = 0.0) -> float:

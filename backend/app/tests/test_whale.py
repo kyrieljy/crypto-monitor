@@ -249,6 +249,7 @@ def test_runner_adds_fill_position_context_from_current_and_old_snapshot(tmp_pat
             "notional": 2100,
             "hash": "0xcurrent",
             "timestamp": 1779760800000,
+            "raw": {"startPosition": "4.0", "side": "B"},
         },
         {
             "coin": "BTC",
@@ -260,6 +261,7 @@ def test_runner_adds_fill_position_context_from_current_and_old_snapshot(tmp_pat
             "notional": 90000,
             "hash": "0xold",
             "timestamp": 1779760801000,
+            "raw": {"startPosition": "3.0", "side": "A"},
         },
     ]
 
@@ -278,9 +280,13 @@ def test_runner_adds_fill_position_context_from_current_and_old_snapshot(tmp_pat
 
     assert payloads[0]["direction_label"] == "买入开多"
     assert payloads[0]["price_label"] == "开仓价格"
+    assert payloads[0]["current_position_size"] == 5
+    assert payloads[0]["current_position_label"] == "5 ETH 多"
     assert payloads[0]["position_leverage"] == 25
     assert payloads[0]["position_margin_mode"] == "全仓"
     assert payloads[1]["direction_label"] == "卖出平多"
     assert payloads[1]["price_label"] == "平仓价格"
+    assert payloads[1]["current_position_size"] == 2
+    assert payloads[1]["current_position_label"] == "2 BTC 多"
     assert payloads[1]["position_leverage"] == 10
     assert payloads[1]["position_margin_mode"] == "逐仓"
