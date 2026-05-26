@@ -555,14 +555,30 @@ class Store:
             tuple(unique_ids),
         )
 
-    def update_news_translation(self, event_id: int, translated_title: str, translated_summary: str) -> None:
+    def update_news_translation(
+        self,
+        event_id: int,
+        translated_title: str,
+        translated_summary: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        if metadata is None:
+            self.db.execute(
+                """
+                UPDATE news_events
+                SET translated_title = ?, translated_summary = ?, last_seen_utc = ?
+                WHERE id = ?
+                """,
+                (translated_title, translated_summary, utc_now_iso(), event_id),
+            )
+            return
         self.db.execute(
             """
             UPDATE news_events
-            SET translated_title = ?, translated_summary = ?, last_seen_utc = ?
+            SET translated_title = ?, translated_summary = ?, metadata_json = ?, last_seen_utc = ?
             WHERE id = ?
             """,
-            (translated_title, translated_summary, utc_now_iso(), event_id),
+            (translated_title, translated_summary, json.dumps(metadata, ensure_ascii=False, sort_keys=True), utc_now_iso(), event_id),
         )
 
     def cleanup_old_data(

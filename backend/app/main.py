@@ -203,8 +203,18 @@ def translate_news(payload: NewsTranslateRequest, _: None = Depends(require_admi
     for row in rows:
         translated_title = translator.translate(row["title"])
         translated_summary = translator.translate_summary(row["content"] or row["title"])
-        if translated_title != row["translated_title"] or translated_summary != row["translated_summary"]:
-            store.update_news_translation(int(row["id"]), translated_title, translated_summary)
+        metadata = json.loads(row["metadata_json"] or "{}")
+        translated_metadata = translator.translate_metadata(
+            metadata,
+            source_content=row["content"] or row["title"],
+            translated_summary=translated_summary,
+        )
+        if (
+            translated_title != row["translated_title"]
+            or translated_summary != row["translated_summary"]
+            or translated_metadata != metadata
+        ):
+            store.update_news_translation(int(row["id"]), translated_title, translated_summary, translated_metadata)
             updated += 1
         else:
             unchanged += 1

@@ -240,7 +240,7 @@ def format_news_notification(row: Any) -> tuple[str, str]:
     if original_url and original_url != row["url"]:
         lines.append(f"原帖: {original_url}")
     if isinstance(card, dict) and card.get("url"):
-        card_title = _plain_text(card.get("title") or card.get("url"))
+        card_title = _plain_text(card.get("translated_title") or card.get("title") or card.get("url"))
         lines.append(f"卡片: {card_title} ({card.get('url')})")
     if media_url:
         lines.append(f"媒体预览: {media_url}")

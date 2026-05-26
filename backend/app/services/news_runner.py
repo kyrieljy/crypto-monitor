@@ -81,6 +81,11 @@ class NewsRunner:
                     suppress = event.published_at < monitoring_started_at or not bool(categories.intersection(immediate_categories))
                     translated_title = self.translator.translate(event.title)
                     translated_summary = self.translator.translate_summary(event.content or event.title)
+                    translated_metadata = self.translator.translate_metadata(
+                        event.metadata,
+                        source_content=event.content,
+                        translated_summary=translated_summary,
+                    )
                     status, event_id = self.store.upsert_news_event(
                         source_type=event.source_type,
                         source_name=event.source_name,
@@ -93,7 +98,7 @@ class NewsRunner:
                         translated_summary=translated_summary,
                         url=event.url,
                         raw_hash=event.raw_hash,
-                        metadata=event.metadata,
+                        metadata=translated_metadata,
                         suppress_notification=suppress,
                     )
                     if status == "inserted_new":

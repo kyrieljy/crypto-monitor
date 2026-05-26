@@ -547,6 +547,8 @@ function renderModule(id: string, module: DashboardModule | undefined, data: Sna
             const media = newsMediaItems(item);
             const card = newsCard(item);
             const newsUrl = newsTargetUrl(item, card);
+            const cardTitle = card ? newsCardTitle(card) : "";
+            const cardDescription = card ? newsCardDescription(card) : "";
             return (
               <a key={item.id} className="news-row" href={newsUrl} target="_blank" rel="noreferrer">
                 {media.length > 0 && (
@@ -568,10 +570,10 @@ function renderModule(id: string, module: DashboardModule | undefined, data: Sna
                 {newsSummary && <p>{newsSummary}</p>}
                 {card && (
                   <div className="news-card-preview">
-                    {card.image_url && !media.some((mediaItem) => newsMediaImageUrl(mediaItem) === card.image_url) && <img src={card.image_url} alt={card.title || newsTitle} loading="lazy" onError={(event) => { event.currentTarget.style.display = "none"; }} />}
+                    {card.image_url && !media.some((mediaItem) => newsMediaImageUrl(mediaItem) === card.image_url) && <img src={card.image_url} alt={cardTitle || newsTitle} loading="lazy" onError={(event) => { event.currentTarget.style.display = "none"; }} />}
                     <div>
-                      <b>{card.title || "链接预览"}</b>
-                      {card.description && <span>{card.description}</span>}
+                      <b>{cardTitle || "链接预览"}</b>
+                      {cardDescription && <span>{cardDescription}</span>}
                     </div>
                   </div>
                 )}
@@ -1029,15 +1031,24 @@ function parseHealthError(message?: string | null) {
 }
 
 type NewsMediaItem = { type?: string; url?: string; thumbnail_url?: string; source?: string };
-type NewsCard = { title?: string; description?: string; url?: string; image_url?: string; media_type?: string };
+type NewsCard = {
+  title?: string;
+  description?: string;
+  translated_title?: string;
+  translated_description?: string;
+  url?: string;
+  image_url?: string;
+  media_type?: string;
+};
 type AlertDetailRow = { label: string; value: string; emphasis?: boolean };
 
 function displayNewsTitle(item: NewsEvent) {
   const title = usableNewsText(item.translated_title) || stripHtml(item.title).trim();
   if (!isGenericNewsTitle(title)) return title;
   const card = newsCard(item);
-  if (card?.title && !repostMediaKind(item, card)) {
-    return `${newsKindLabel(item)}：${card.title}`;
+  if (card && !repostMediaKind(item, card)) {
+    const cardTitle = newsCardTitle(card);
+    if (cardTitle) return `${newsKindLabel(item)}：${cardTitle}`;
   }
   return `${newsKindLabel(item)}，点击查看`;
 }
@@ -1046,8 +1057,9 @@ function displayNewsSummary(item: NewsEvent) {
   const title = displayNewsTitle(item);
   const translatedTitle = usableNewsText(item.translated_title);
   const translatedSummary = usableNewsText(item.translated_summary);
-  const summary = translatedSummary || stripHtml(item.content).trim();
   const card = newsCard(item);
+  const translatedCardDescription = card ? usableNewsText(card.translated_description) : "";
+  const summary = translatedSummary || translatedCardDescription || stripHtml(item.content).trim();
   const repostMedia = repostMediaKind(item, card);
   if (isLegacyTruthMediaItem(item)) {
     return `${newsKindLabel(item)}，点击查看原帖。`;
@@ -1058,7 +1070,10 @@ function displayNewsSummary(item: NewsEvent) {
   if (summary && !isBrokenLegacyTruthText(summary) && !isDuplicateNewsText(title, summary) && !isDuplicateNewsText(item.title, item.content) && !isDuplicateNewsText(translatedTitle, translatedSummary)) {
     return summary;
   }
-  if (card?.description) return card.description;
+  if (card) {
+    const cardDescription = newsCardDescription(card);
+    if (cardDescription) return cardDescription;
+  }
   if (newsMediaItems(item).length || card) {
     return `${newsKindLabel(item)}，点击查看原帖。`;
   }
@@ -1163,11 +1178,21 @@ function newsCard(item: NewsEvent): NewsCard | null {
   const result: NewsCard = {
     title: typeof card.title === "string" ? card.title : "",
     description: typeof card.description === "string" ? card.description : "",
+    translated_title: typeof card.translated_title === "string" ? card.translated_title : "",
+    translated_description: typeof card.translated_description === "string" ? card.translated_description : "",
     url: typeof card.url === "string" ? card.url : "",
     image_url: typeof card.image_url === "string" && isAllowedNewsMediaUrl(card.image_url) ? card.image_url : "",
     media_type: typeof card.media_type === "string" ? card.media_type : ""
   };
   return result.title || result.description || result.url || result.image_url ? result : null;
+}
+
+function newsCardTitle(card: NewsCard) {
+  return usableNewsText(card.translated_title) || card.title || "";
+}
+
+function newsCardDescription(card: NewsCard) {
+  return usableNewsText(card.translated_description) || card.description || "";
 }
 
 function newsTargetUrl(item: NewsEvent, card?: NewsCard | null) {

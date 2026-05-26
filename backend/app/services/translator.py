@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from copy import deepcopy
 from urllib import request
 
 from ..core.security import decrypt_json
@@ -66,6 +67,28 @@ class Translator:
     def translate_summary(self, text: str) -> str:
         return self.translate(summarize_text(text, 300))
 
+    def translate_metadata(
+        self,
+        metadata: dict[str, object],
+        *,
+        source_content: str = "",
+        translated_summary: str = "",
+    ) -> dict[str, object]:
+        result = deepcopy(metadata)
+        card = result.get("card")
+        if not isinstance(card, dict):
+            return result
+        description = str(card.get("description") or "").strip()
+        if description:
+            if translated_summary and _same_plain_text(description, source_content):
+                card["translated_description"] = translated_summary
+            else:
+                card["translated_description"] = self.translate_summary(description)
+        title = str(card.get("title") or "").strip()
+        if title and not _looks_like_social_account_title(title):
+            card["translated_title"] = self.translate(title)
+        return result
+
 
 def _should_skip_translation(text: str) -> bool:
     value = text.strip()
@@ -74,3 +97,11 @@ def _should_skip_translation(text: str) -> bool:
     chinese_count = len(re.findall(r"[\u3400-\u9fff]", value))
     latin_count = len(re.findall(r"[A-Za-z]", value))
     return chinese_count >= 2 and chinese_count >= latin_count
+
+
+def _same_plain_text(left: str, right: str) -> bool:
+    return re.sub(r"\s+", " ", left.strip()) == re.sub(r"\s+", " ", right.strip())
+
+
+def _looks_like_social_account_title(value: str) -> bool:
+    return bool(re.search(r"\(@[A-Za-z0-9_]+\)\s*$", value.strip()))
