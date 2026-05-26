@@ -634,6 +634,10 @@ def _distance_pct(mark_price: float | None, liquidation_price: float | None) -> 
 
 def _fill_direction_label(side_code: str, direction: str) -> str:
     normalized = str(direction or "").strip().lower().replace("_", " ")
+    if "liquidated" in normalized:
+        margin = "全仓" if "cross" in normalized else "逐仓" if "isolated" in normalized else ""
+        side = "多单" if "long" in normalized else "空单" if "short" in normalized else ""
+        return f"强平{margin}{side}" if margin or side else "强平"
     if "open long" in normalized:
         return "买入开多"
     if "close long" in normalized:
@@ -649,6 +653,8 @@ def _fill_direction_label(side_code: str, direction: str) -> str:
 
 def _fill_price_label(direction: str) -> str:
     normalized = str(direction or "").strip().lower().replace("_", " ")
+    if "liquidated" in normalized:
+        return "强平价格"
     if "close" in normalized:
         return "平仓价格"
     if "open" in normalized:

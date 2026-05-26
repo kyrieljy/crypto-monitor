@@ -6,7 +6,7 @@ import logging
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -52,6 +52,7 @@ from .services.whale_runner import WhaleRunner
 
 settings = load_runtime_settings()
 logging.basicConfig(level=getattr(logging, settings.log_level, logging.INFO), format="%(asctime)s %(levelname)s %(name)s %(message)s")
+LOGGER = logging.getLogger("market_monitor.api")
 
 db = Database(settings.database_path, settings.app_secret_key)
 store = Store(db)
@@ -237,8 +238,18 @@ def resolve_whale_address(payload: WhaleAddressResolveRequest, _: None = Depends
 
 
 @app.put("/api/whales", response_model=WhaleTargetOut)
-def put_whale_target(payload: WhaleTargetUpsert, _: None = Depends(require_admin)) -> WhaleTargetOut:
-    return store.upsert_whale_target(payload)
+def put_whale_target(payload: WhaleTargetUpsert, background_tasks: BackgroundTasks, _: None = Depends(require_admin)) -> WhaleTargetOut:
+    target = store.upsert_whale_target(payload)
+    if target.enabled:
+        background_tasks.add_task(_sync_whale_target_after_upsert, target.id)
+    return target
+
+
+def _sync_whale_target_after_upsert(target_id: str) -> None:
+    try:
+        WhaleRunner(store, bus, settings.request_timeout_seconds).sync_target_now(target_id, force_extended=True)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("新增/更新巨鲸对象后立即同步失败 target=%s error=%s", target_id, exc)
 
 
 @app.delete("/api/whales/{target_id}")

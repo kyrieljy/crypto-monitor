@@ -68,7 +68,30 @@ class WhaleRunner:
             except Exception:  # noqa: BLE001
                 LOGGER.exception("巨鲸目标同步失败 target=%s", target.id)
 
-    def _sync_target(self, target: Any, addresses: list[str], config: dict[str, Any], secret: dict[str, Any]) -> None:
+    def sync_target_now(self, target_id: str, *, force_extended: bool = True) -> None:
+        strategy = self.store.get_strategy("whale")
+        if strategy is None or not strategy.enabled or not bool(strategy.config.get("enabled", True)):
+            return
+        target = self.store.get_whale_target(target_id)
+        if target is None or not target.enabled:
+            return
+        addresses = _target_addresses(target.address_or_subject, target.config)
+        if not addresses:
+            self.store.save_whale_snapshot(
+                target.id,
+                {
+                    "positions": [],
+                    "holdings": [],
+                    "defi_positions": [],
+                    "open_orders": [],
+                    "account_summary": {},
+                    "source_status": {"address": {"ok": False, "message": "未配置完整 EVM 地址"}},
+                },
+            )
+            return
+        self._sync_target(target, addresses, dict(strategy.config), self.store.get_whale_secret(), force_extended=force_extended)
+
+    def _sync_target(self, target: Any, addresses: list[str], config: dict[str, Any], secret: dict[str, Any], *, force_extended: bool = False) -> None:
         target_id = str(target.id)
         old_snapshot = self.store.get_whale_snapshot(target_id)
         snapshots = []
@@ -77,7 +100,7 @@ class WhaleRunner:
             if bool(config.get("hyperliquid_enabled", True)):
                 provider = HyperliquidProvider(str(config.get("hyperliquid_base_url") or "https://api.hyperliquid.xyz"), self.timeout_seconds)
                 try:
-                    include_extended = self._should_refresh_extended(target.id, address, config)
+                    include_extended = force_extended or self._should_refresh_extended(target.id, address, config)
                     snapshot = provider.fetch(address, include_extended=include_extended)
                     if not include_extended:
                         _preserve_extended_snapshot_fields(snapshot, old_snapshot)
@@ -332,6 +355,10 @@ def _coin_key(value: Any) -> str:
 def _direction_label(fill: dict[str, Any]) -> str:
     direction = str(fill.get("direction") or "").strip()
     normalized = direction.lower().replace("_", " ")
+    if "liquidated" in normalized:
+        margin = "全仓" if "cross" in normalized else "逐仓" if "isolated" in normalized else ""
+        side = "多单" if "long" in normalized else "空单" if "short" in normalized else ""
+        return f"强平{margin}{side}" if margin or side else "强平"
     if "open long" in normalized:
         return "买入开多"
     if "close long" in normalized:
@@ -345,6 +372,8 @@ def _direction_label(fill: dict[str, Any]) -> str:
 
 def _price_label(fill: dict[str, Any]) -> str:
     normalized = str(fill.get("direction") or "").strip().lower().replace("_", " ")
+    if "liquidated" in normalized:
+        return "强平价格"
     if "close" in normalized:
         return "平仓价格"
     if "open" in normalized:

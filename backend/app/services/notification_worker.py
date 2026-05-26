@@ -78,10 +78,15 @@ def _mask_address(value: Any) -> str:
 
 def _whale_direction_label(fill: dict[str, Any], payload: dict[str, Any]) -> str:
     label = str(payload.get("direction_label") or fill.get("direction_label") or "").strip()
-    if label:
+    normalized_label = label.lower().replace("_", " ")
+    if label and "liquidated" not in normalized_label:
         return label
     direction = str(fill.get("direction") or "").strip()
-    normalized = direction.lower().replace("_", " ")
+    normalized = (direction or label).lower().replace("_", " ")
+    if "liquidated" in normalized:
+        margin = "全仓" if "cross" in normalized else "逐仓" if "isolated" in normalized else ""
+        side = "多单" if "long" in normalized else "空单" if "short" in normalized else ""
+        return f"强平{margin}{side}" if margin or side else "强平"
     if "open long" in normalized:
         return "买入开多"
     if "close long" in normalized:
@@ -98,6 +103,8 @@ def _whale_price_label(fill: dict[str, Any], payload: dict[str, Any]) -> str:
     if label:
         return label
     normalized = str(fill.get("direction") or "").strip().lower().replace("_", " ")
+    if "liquidated" in normalized:
+        return "强平价格"
     if "close" in normalized:
         return "平仓价格"
     if "open" in normalized:

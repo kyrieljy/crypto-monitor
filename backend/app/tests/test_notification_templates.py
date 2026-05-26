@@ -94,6 +94,38 @@ def test_whale_trade_notification_template_handles_missing_leverage() -> None:
     assert "仓位动作: 买入开多" in message
     assert "开仓价格: $2,100.00" in message
     assert "杠杆: --" in message
+
+
+def test_whale_trade_notification_template_localizes_liquidation_direction() -> None:
+    row = {
+        "id": 1,
+        "provider": "hyperliquid",
+        "target_id": "1011-whale",
+        "target_label": "1011巨鲸",
+        "address_or_subject": "0xb317D2BC2D3d2Df5Fa441B5bAE0AB9d8b07283ae",
+        "action_type": "large_trade_sell",
+        "payload_json": json.dumps(
+            {
+                "direction_label": "Liquidated Cross Long",
+                "fill": {
+                    "coin": "ETH",
+                    "side": "卖出",
+                    "direction": "Liquidated Cross Long",
+                    "size": 98537.8279,
+                    "price": 2224,
+                    "notional": 219172764,
+                    "closed_pnl": -91164242,
+                },
+            },
+            ensure_ascii=False,
+        ),
+        "occurred_at_utc": "2026-02-01T02:43:00+00:00",
+    }
+
+    message = format_whale_notification(row)
+
+    assert "仓位动作: 强平全仓多单" in message
+    assert "强平价格: $2,224.00" in message
 import pytest
 
 from backend.app.services.notification_worker import format_alert_notification, format_news_notification, format_whale_notification

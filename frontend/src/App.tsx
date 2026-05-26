@@ -1553,8 +1553,8 @@ function AssetCard({ item, protocol = false }: { item: Record<string, any>; prot
 
 function WhaleFillRow({ fill, isLarge = false }: { fill: Record<string, any>; isLarge?: boolean }) {
   const positive = Number(fill.closed_pnl ?? 0) >= 0;
-  const directionLabel = String(fill.direction_label ?? fill.direction ?? "--");
-  const priceLabel = String(fill.price_label ?? "成交价格");
+  const directionLabel = whaleFillDirectionLabel(fill);
+  const priceLabel = whaleFillPriceLabel(fill);
   return (
     <article className="whale-row">
       <div>
@@ -1572,16 +1572,16 @@ function WhaleFillRow({ fill, isLarge = false }: { fill: Record<string, any>; is
 
 function FillRow({ fill, isLarge = false }: { fill: Record<string, any>; isLarge?: boolean }) {
   const positive = Number(fill.closed_pnl ?? 0) >= 0;
-  const directionLabel = String(fill.direction_label ?? fill.direction ?? "--");
-  const priceLabel = String(fill.price_label ?? "成交价格");
+  const directionLabel = whaleFillDirectionLabel(fill);
+  const priceLabel = whaleFillPriceLabel(fill);
   return (
     <article className="whale-row">
       <div>
-        <strong>{String(fill.side ?? "--")} {String(fill.coin ?? "")}{isLarge ? " · 大额" : ""}</strong>
-        <small>{cnDateFromAny(fill.timestamp)} · {String(fill.direction ?? "--")}</small>
+        <strong>{directionLabel} {String(fill.coin ?? "")}{isLarge ? " · 大额" : ""}</strong>
+        <small>{cnDateFromAny(fill.timestamp)}</small>
       </div>
       <div><small>数量</small><strong>{formatNumber(fill.size ?? 0, 4)}</strong></div>
-      <div><small>均价</small><strong>{money(fill.price)}</strong></div>
+      <div><small>{priceLabel}</small><strong>{money(fill.price)}</strong></div>
       <div><small>成交额</small><strong>{money(fill.notional)}</strong></div>
       <div><small>手续费</small><strong>{fill.fee == null ? "--" : `${formatNumber(fill.fee, 4)} ${String(fill.fee_token ?? "")}`}</strong></div>
       <div><small>已实现盈亏</small><strong className={positive ? "up" : "down"}>{money(fill.closed_pnl, { showZero: true })}</strong></div>
@@ -1627,6 +1627,28 @@ function LedgerRow({ item }: { item: Record<string, any> }) {
       <div><small>金额</small><strong>{money(item.amount, { showZero: true })}</strong></div>
     </article>
   );
+}
+
+function whaleFillDirectionLabel(fill: Record<string, any>) {
+  const label = String(fill.direction_label ?? "").trim();
+  const direction = String(fill.direction ?? label).trim();
+  const normalized = direction.toLowerCase().replace(/_/g, " ");
+  if (normalized.includes("liquidated")) {
+    const margin = normalized.includes("cross") ? "全仓" : normalized.includes("isolated") ? "逐仓" : "";
+    const side = normalized.includes("long") ? "多单" : normalized.includes("short") ? "空单" : "";
+    return margin || side ? `强平${margin}${side}` : "强平";
+  }
+  return label || direction || "--";
+}
+
+function whaleFillPriceLabel(fill: Record<string, any>) {
+  const label = String(fill.price_label ?? "").trim();
+  if (label) return label;
+  const normalized = String(fill.direction ?? fill.direction_label ?? "").trim().toLowerCase().replace(/_/g, " ");
+  if (normalized.includes("liquidated")) return "强平价格";
+  if (normalized.includes("close")) return "平仓价格";
+  if (normalized.includes("open")) return "开仓价格";
+  return "成交价格";
 }
 
 function cnDateFromAny(value: unknown) {

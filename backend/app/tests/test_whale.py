@@ -6,7 +6,7 @@ from pathlib import Path
 from backend.app.api.schemas import WhaleTargetUpsert
 from backend.app.core.database import Database
 from backend.app.services.store import Store
-from backend.app.services.whale import DeBankProvider, HyperliquidProvider, extract_addresses, resolve_address_candidates
+from backend.app.services.whale import DeBankProvider, HyperliquidProvider, WhaleSnapshot, extract_addresses, resolve_address_candidates
 from backend.app.services.whale_runner import WhaleRunner
 
 
@@ -91,18 +91,32 @@ def test_hyperliquid_fill_fixture_is_normalized() -> None:
                 "fee": "12.5",
                 "feeToken": "USDC",
                 "time": 1779760800000,
+            },
+            {
+                "coin": "ETH",
+                "px": "2224",
+                "sz": "98537.8279",
+                "side": "A",
+                "dir": "Liquidated Cross Long",
+                "closedPnl": "-91164242",
+                "time": 1779760801000,
             }
         ]
     )
 
-    assert fills[0]["coin"] == "ETH"
-    assert fills[0]["side"] == "买入"
-    assert fills[0]["size"] == 100
-    assert fills[0]["price"] == 2100.5
-    assert fills[0]["notional"] == 210050
-    assert fills[0]["fee"] == 12.5
-    assert fills[0]["direction_label"] == "买入开多"
-    assert fills[0]["price_label"] == "开仓价格"
+    open_long = next(fill for fill in fills if fill["direction"] == "Open Long")
+    liquidation = next(fill for fill in fills if fill["direction"] == "Liquidated Cross Long")
+
+    assert open_long["coin"] == "ETH"
+    assert open_long["side"] == "买入"
+    assert open_long["size"] == 100
+    assert open_long["price"] == 2100.5
+    assert open_long["notional"] == 210050
+    assert open_long["fee"] == 12.5
+    assert open_long["direction_label"] == "买入开多"
+    assert open_long["price_label"] == "开仓价格"
+    assert liquidation["direction_label"] == "强平全仓多单"
+    assert liquidation["price_label"] == "强平价格"
 
 
 def test_debank_fixtures_are_normalized() -> None:
@@ -290,3 +304,49 @@ def test_runner_adds_fill_position_context_from_current_and_old_snapshot(tmp_pat
     assert payloads[1]["current_position_label"] == "2 BTC 多"
     assert payloads[1]["position_leverage"] == 10
     assert payloads[1]["position_margin_mode"] == "逐仓"
+
+
+def test_sync_target_now_forces_extended_snapshot(monkeypatch, tmp_path: Path) -> None:
+    store = Store(Database(tmp_path / "test.db", "secret"))
+    strategy = store.get_strategy("whale")
+    assert strategy is not None
+    config = dict(strategy.config)
+    config["enabled"] = True
+    store.update_strategy("whale", True, config, None)
+    target = store.upsert_whale_target(
+        WhaleTargetUpsert(
+            id="instant-whale",
+            label="Instant Whale",
+            address_or_subject="0x2222222222222222222222222222222222222222",
+            enabled=True,
+            config={},
+        )
+    )
+    include_extended_calls: list[bool] = []
+
+    class FakeHyperliquidProvider:
+        source_name = "hyperliquid"
+        label = "Hyperliquid"
+
+        def __init__(self, base_url: str, timeout_seconds: int) -> None:
+            pass
+
+        def fetch(self, address: str, *, include_extended: bool = True) -> WhaleSnapshot:
+            include_extended_calls.append(include_extended)
+            return WhaleSnapshot(
+                positions=[{"coin": "ETH", "symbol": "ETH-USDC", "side": "做多", "size": 1, "notional": 2200}],
+                fills=[],
+                historical_orders=[{"coin": "ETH", "size": 1}],
+                funding=[{"coin": "ETH", "amount": -1}],
+                account_summary={"account_value": 10000},
+            )
+
+    monkeypatch.setattr("backend.app.services.whale_runner.HyperliquidProvider", FakeHyperliquidProvider)
+
+    WhaleRunner(store, bus=None).sync_target_now(target.id, force_extended=True)  # type: ignore[arg-type]
+
+    snapshot = store.get_whale_snapshot(target.id)
+    assert include_extended_calls == [True]
+    assert snapshot["positions"][0]["coin"] == "ETH"
+    assert snapshot["historical_orders"][0]["coin"] == "ETH"
+    assert snapshot["funding"][0]["amount"] == -1
