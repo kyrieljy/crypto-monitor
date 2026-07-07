@@ -1079,6 +1079,7 @@ class BlackRockFreeProvider:
                     "feed_url": feed_url,
                     "title": title or content_text[:120] or "IBIT 新闻线索",
                     "summary": content_text[:500],
+                    "original_text": content_text[:4000],
                     "url": link or feed_url,
                     "published_at": _parse_feed_datetime(published_at).isoformat(),
                     "txids": txids,

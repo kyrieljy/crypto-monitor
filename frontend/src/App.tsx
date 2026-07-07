@@ -1565,12 +1565,13 @@ function NewsSignalMatchList({
     <div className="news-match-address-list">
       {matches.map(({ item, signal, confidence }) => {
         const address = String(item.address ?? "");
+        const largeMatch = signal.large_transfer_match && typeof signal.large_transfer_match === "object" ? signal.large_transfer_match as Record<string, any> : {};
         const operation = signal.operation && typeof signal.operation === "object" ? signal.operation as Record<string, any> : Array.isArray(item.latest_operations) ? item.latest_operations[0] : undefined;
         const reasons = Array.isArray(signal.match_reasons) && signal.match_reasons.length ? signal.match_reasons : Array.isArray(item.reasons) ? item.reasons : [];
         const label = inferredBtcAddressLabel(signal, target);
         const isBtc = isBtcAddress(address);
         const isSubscribed = subscribed.has(normalizeAddress(address));
-        const operationAsset = transferAsset(operation ?? signal.large_transfer_match?.transfer ?? {});
+        const operationInfo = newsMatchOperationInfo(operation, largeMatch, signal);
         return (
           <div className="news-match-address-row" key={address}>
             <div>
@@ -1579,18 +1580,127 @@ function NewsSignalMatchList({
             </div>
             <div className="news-match-address-row__metrics">
               <span>置信度 {formatNumber(confidence * 100, 0)}%</span>
-              {operation && <span>{cnDateFromAny(operation.timestamp ?? operation.timestamp_ms)} {String(operation.behavior ?? operation.direction ?? "操作")} {formatNumber(Number(operation.amount ?? operation.amount_btc ?? 0), 4)} {operationAsset}</span>}
+              <span>{operationInfo.kind}</span>
               {Array.isArray(signal.txids) && signal.txids.length ? <span>txid {signal.txids.map((txid: unknown) => shortText(txid, 10)).join(", ")}</span> : null}
             </div>
-            <p>{reasons.slice(0, 4).join("；") || "新闻与链上底单存在相似时间、金额或方向特征。"}</p>
+            <div className="news-match-address-row__behavior">
+              <b>命中行为</b>
+              <span>{operationInfo.summary}</span>
+            </div>
+            <p>匹配依据：{reasons.slice(0, 4).join("；") || "新闻与链上底单存在相似时间、金额或方向特征。"}</p>
             <div className="news-match-address-row__actions">
-              {operation?.source_url && <a href={String(operation.source_url)} target="_blank" rel="noreferrer">{transferExplorerLabel(operation)}</a>}
+              {operationInfo.sourceUrl && <a href={operationInfo.sourceUrl} target="_blank" rel="noreferrer">{operationInfo.explorerLabel}</a>}
               {!isBtc ? <span className="status off">ETH候选</span> : isSubscribed ? <span className="status on">已订阅</span> : canAdmin ? <button disabled={subscribing || !address} onClick={() => onSubscribe(address, label)}><Plus size={14} /> 订阅地址</button> : <span className="status off">未订阅</span>}
             </div>
           </div>
         );
       })}
       {!matches.length && <span className="empty">这条新闻暂无匹配地址。</span>}
+    </div>
+  );
+}
+
+function newsMatchOperationInfo(operation: Record<string, any> | undefined, largeMatch: Record<string, any>, signal: Record<string, any>) {
+  const transfer = largeMatch.transfer && typeof largeMatch.transfer === "object" ? largeMatch.transfer as Record<string, any> : {};
+  const source = operation ?? transfer;
+  const asset = transferAsset(source);
+  const role = String(largeMatch.address_role ?? operation?.address_role ?? "");
+  const roleText = role === "source" ? "资金来源地址" : role === "receiver" ? "接收地址" : role === "input" ? "输入地址" : role === "output" ? "输出地址" : "匹配地址";
+  const behavior = String(operation?.behavior ?? largeMatch.behavior ?? signal.behavior ?? (role === "source" ? "转出" : role === "receiver" ? "转入" : "链上操作"));
+  const amount = Number(operation?.amount ?? operation?.amount_btc ?? operation?.amount_eth ?? largeMatch.address_value ?? largeMatch.address_value_btc ?? largeMatch.address_value_eth ?? transfer.amount ?? transfer.amount_btc ?? 0);
+  const timeValue = operation?.timestamp ?? operation?.timestamp_ms ?? operation?.block_time_utc ?? transfer.block_time_utc ?? signal.published_at;
+  const txid = String(operation?.txid ?? largeMatch.txid ?? transfer.txid ?? (Array.isArray(signal.txids) ? signal.txids[0] : "") ?? "");
+  const sourceUrl = String(operation?.source_url ?? largeMatch.source_url ?? transfer.source_url ?? "");
+  const explorerLabel = transferExplorerLabel(source);
+  const actionText = [
+    cnDateFromAny(timeValue),
+    roleText,
+    behavior,
+    amount > 0 ? `${formatNumber(amount, 4)} ${asset}` : "",
+    txid ? `txid ${shortText(txid, 12)}` : "",
+  ].filter(Boolean).join(" · ");
+  return {
+    kind: Object.keys(largeMatch).length ? "链上大额底表" : operation ? "账户底单" : "新闻文本匹配",
+    summary: actionText || "未关联到单笔链上行为，只命中新闻关键词、金额或 txid。",
+    sourceUrl: /^https?:\/\//i.test(sourceUrl) ? sourceUrl : "",
+    explorerLabel,
+  };
+}
+
+function NewsSignalOriginal({ signal }: { signal: Record<string, any> }) {
+  const url = String(signal.url ?? "");
+  const source = String(signal.source ?? "");
+  const text = String(signal.original_text ?? signal.summary ?? "").trim();
+  const canOpen = /^https?:\/\//i.test(url);
+  return (
+    <div className="news-signal-original">
+      <div className="news-signal-original__head">
+        <div>
+          <strong>原文线索</strong>
+          <small>{[source, cnDateFromAny(signal.published_at)].filter(Boolean).join(" · ")}</small>
+        </div>
+        {canOpen && <a href={url} target="_blank" rel="noreferrer">打开原文</a>}
+      </div>
+      <p>{text || "这条新闻源没有提供正文，只能通过原文链接查看。"}</p>
+    </div>
+  );
+}
+
+function BtcTransferNewsMatches({ matches }: { matches: Array<Record<string, any>> }) {
+  const [expandedKey, setExpandedKey] = useState("");
+  if (!matches.length) {
+    return (
+      <div className="btc-transfer-news-matches">
+        <span className="empty">这笔交易暂未命中 IBIT 新闻线索。</span>
+      </div>
+    );
+  }
+  return (
+    <div className="btc-transfer-news-matches">
+      <div className="btc-transfer-news-matches__head">
+        <strong>命中新闻</strong>
+        <span>{matches.length} 条</span>
+      </div>
+      {matches.map((match, index) => {
+        const rawSignal = match.signal ?? match.news_signal;
+        const signal = rawSignal && typeof rawSignal === "object" ? rawSignal as Record<string, any> : {};
+        const displaySignal = { ...signal, published_at: signal.published_at ?? match.published_at_utc };
+        const title = String(signal.title ?? match.signal_id ?? "IBIT 新闻线索");
+        const key = `${String(match.signal_id ?? signal.id ?? title)}-${String(match.candidate_address ?? "")}-${index}`;
+        const expanded = expandedKey === key;
+        const confidence = Number(match.confidence ?? 0);
+        const reasons = Array.isArray(match.reasons) ? match.reasons.map((item) => String(item)).filter(Boolean) : [];
+        const asset = String(match.asset ?? (match.transfer as Record<string, any> | undefined)?.asset ?? "BTC").toUpperCase();
+        const role = String(match.address_role ?? "");
+        const roleText = role === "input" ? "输入地址" : role === "output" ? "输出地址" : "命中地址";
+        const address = String(match.candidate_address ?? "");
+        const addressValue = Number(match.address_value ?? match.address_value_btc ?? match.address_value_eth ?? 0);
+        const dateText = cnDateFromAny(displaySignal.published_at);
+        return (
+          <article className="btc-transfer-news-match" key={key}>
+            <button className="btc-transfer-news-match__button" onClick={() => setExpandedKey(expanded ? "" : key)}>
+              <span>
+                <strong>{title}</strong>
+                <small>
+                  {dateText} · 置信度 {formatNumber(confidence * 100, 0)}% · {roleText} {address ? shortText(address, 10) : "--"}
+                  {addressValue > 0 ? ` · ${formatNumber(addressValue, 4)} ${asset}` : ""}
+                </small>
+              </span>
+              <em>{expanded ? "收起原文" : "查看原文"}</em>
+            </button>
+            {reasons.length > 0 && (
+              <div className="btc-transfer-news-match__reasons">
+                {reasons.slice(0, 4).map((reason) => <span key={reason}>{reason}</span>)}
+              </div>
+            )}
+            {expanded && (
+              <div className="btc-transfer-news-match__detail">
+                <NewsSignalOriginal signal={displaySignal} />
+              </div>
+            )}
+          </article>
+        );
+      })}
     </div>
   );
 }
@@ -1891,7 +2001,7 @@ function WhaleDetailPage({ targetId, onBack, setNotice }: { targetId: string; on
               const usdAmounts = Array.isArray(signal.usd_amounts) ? signal.usd_amounts : [];
               const txidCount = Array.isArray(signal.txids) ? signal.txids.length : 0;
               return (
-                <div className="news-match-card" key={key}>
+                <div className={`news-match-card${expanded ? " expanded" : ""}`} key={key}>
                   <button className="news-match-card__button" onClick={() => setSelectedIbitNewsId(expanded ? "" : key)}>
                     <span className="news-match-card__main">
                       <span className="news-match-card__title-line">
@@ -1910,19 +2020,22 @@ function WhaleDetailPage({ targetId, onBack, setNotice }: { targetId: string; on
                     <em>{expanded ? "收起" : "查看匹配"}</em>
                   </button>
                   {expanded && (
-                    <NewsSignalMatchList
-                      matches={matches}
-                      target={target}
-                      canAdmin={Boolean(localStorage.getItem("adminToken"))}
-                      subscribing={subscribeNewsAddress.isPending}
-                      onSubscribe={(address, label) => {
-                        if (isSubscribedBtcAddress(target, address)) {
-                          setNotice(`这个 BTC 地址已经在监控中：${shortText(address, 10)}`);
-                          return;
-                        }
-                        subscribeNewsAddress.mutate({ address, label });
-                      }}
-                    />
+                    <>
+                      <NewsSignalOriginal signal={signal} />
+                      <NewsSignalMatchList
+                        matches={matches}
+                        target={target}
+                        canAdmin={Boolean(localStorage.getItem("adminToken"))}
+                        subscribing={subscribeNewsAddress.isPending}
+                        onSubscribe={(address, label) => {
+                          if (isSubscribedBtcAddress(target, address)) {
+                            setNotice(`这个 BTC 地址已经在监控中：${shortText(address, 10)}`);
+                            return;
+                          }
+                          subscribeNewsAddress.mutate({ address, label });
+                        }}
+                      />
+                    </>
                   )}
                   {false && expanded && (
                     <div className="records news-match-card__detail">
@@ -2317,19 +2430,7 @@ function BtcTransferDetail({
           {!topOutputs.length && <span className="empty">暂无输出地址</span>}
         </section>
       </div>
-      <div className="records compact">
-        {transfer.matches.map((match, index) => {
-          const signal = match.signal && typeof match.signal === "object" ? match.signal as Record<string, any> : {};
-          const reasons = Array.isArray(match.reasons) ? match.reasons : [];
-          return (
-            <span key={`${match.signal_id}-${index}`}>
-              新闻匹配 {formatNumber(Number(match.confidence ?? 0) * 100, 0)}% · {String(signal.title ?? "IBIT 新闻线索")} · {String(match.candidate_address ?? "")}
-              {reasons.length ? ` · ${reasons.slice(0, 3).join("；")}` : ""}
-            </span>
-          );
-        })}
-        {!transfer.matches.length && <span className="empty">这笔交易暂未命中 IBIT 新闻线索</span>}
-      </div>
+      <BtcTransferNewsMatches matches={transfer.matches} />
     </div>
   );
 }

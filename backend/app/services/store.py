@@ -849,12 +849,20 @@ class Store:
                     continue
                 cursor = self.db.execute(
                     """
-                    INSERT OR IGNORE INTO btc_news_matches (
+                    INSERT INTO btc_news_matches (
                         target_id, signal_id, txid, candidate_address, address_role,
                         confidence, reasons_json, signal_json, transfer_json,
                         published_at_utc, matched_at_utc
                     )
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(target_id, signal_id, txid, candidate_address, address_role)
+                    DO UPDATE SET
+                        confidence = excluded.confidence,
+                        reasons_json = excluded.reasons_json,
+                        signal_json = excluded.signal_json,
+                        transfer_json = excluded.transfer_json,
+                        published_at_utc = excluded.published_at_utc,
+                        matched_at_utc = excluded.matched_at_utc
                     """,
                     (
                         target_id,

@@ -57,6 +57,42 @@ def test_btc_large_transfer_store_dedupes_txid(tmp_path: Path) -> None:
     assert rows.items[0].amount == 4917
 
 
+def test_btc_news_match_upsert_refreshes_signal_snapshot(tmp_path: Path) -> None:
+    store = Store(Database(tmp_path / "test.db", "secret"))
+    transfer = parse_btc_large_transfer(_sample_tx(), block_height=900001, block_hash="block-hash", block_timestamp=1783000000, min_btc=500)
+    assert transfer is not None
+    store.upsert_btc_large_transfer(transfer)
+    match = {
+        "txid": transfer["txid"],
+        "candidate_address": "bc1source111111111111111111111111111111111",
+        "address_role": "source",
+        "confidence": 0.72,
+        "reasons": ["旧匹配理由"],
+        "transfer": transfer,
+    }
+    signal = {
+        "id": "blackrock-news",
+        "title": "贝莱德链上转账",
+        "summary": "旧摘要",
+        "original_text": "旧原文",
+        "published_at": datetime.fromtimestamp(1783000000, tz=timezone.utc).isoformat(),
+        "large_transfer_matches": [match],
+    }
+
+    assert store.save_btc_news_matches("ibit-free", [signal]) == 1
+    signal["summary"] = "新摘要"
+    signal["original_text"] = "新原文"
+    signal["large_transfer_matches"] = [{**match, "confidence": 0.91, "reasons": ["新匹配理由"]}]
+    store.save_btc_news_matches("ibit-free", [signal])
+
+    saved = store.get_btc_large_transfer(str(transfer["txid"]))
+    assert saved is not None
+    assert len(saved.matches) == 1
+    assert saved.matches[0]["confidence"] == 0.91
+    assert saved.matches[0]["reasons"] == ["新匹配理由"]
+    assert saved.matches[0]["signal"]["original_text"] == "新原文"
+
+
 def test_parse_eth_large_transfer_extracts_native_transfer() -> None:
     transfer = parse_eth_large_transfer(
         {
