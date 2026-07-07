@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from backend.app.core.database import Database
@@ -91,6 +91,13 @@ def test_btc_news_match_upsert_refreshes_signal_snapshot(tmp_path: Path) -> None
     assert saved.matches[0]["confidence"] == 0.91
     assert saved.matches[0]["reasons"] == ["新匹配理由"]
     assert saved.matches[0]["signal"]["original_text"] == "新原文"
+
+
+    signal["large_transfer_matches"] = []
+    store.save_btc_news_matches("ibit-free", [signal])
+    saved = store.get_btc_large_transfer(str(transfer["txid"]))
+    assert saved is not None
+    assert saved.matches == []
 
 
 def test_parse_eth_large_transfer_extracts_native_transfer() -> None:
@@ -205,6 +212,60 @@ def test_news_without_txid_matches_large_transfer_by_behavior() -> None:
     assert matches[0]["address_role"] == "source"
     assert matches[0]["confidence"] >= 0.7
     assert any("BTC 数量" in reason for reason in matches[0]["reasons"])
+
+
+def test_news_without_txid_does_not_match_future_large_transfer() -> None:
+    news_time = datetime(2026, 7, 6, 18, 51, tzinfo=timezone.utc)
+    transfer_time = datetime(2026, 7, 7, 11, 9, tzinfo=timezone.utc)
+    transfer = parse_btc_large_transfer(
+        _sample_tx(block_time=int(transfer_time.timestamp())),
+        block_height=956985,
+        block_hash="block-hash",
+        block_timestamp=int(transfer_time.timestamp()),
+        min_btc=500,
+    )
+    assert transfer is not None
+    signal = {
+        "id": "panews-blackrock-before-transfer",
+        "title": "BlackRock sent BTC to Coinbase",
+        "summary": "PANews reported BlackRock transferred 4,917 BTC to Coinbase.",
+        "published_at": news_time.isoformat(),
+        "btc_amounts": [4917],
+        "mentions_coinbase": True,
+        "mentions_blackrock_or_ibit": True,
+    }
+
+    matches = match_news_signal_to_large_transfers(signal, [transfer], window_hours=48, amount_tolerance_pct=8, max_matches=20)
+
+    assert matches == []
+
+
+def test_news_with_exact_txid_can_match_future_large_transfer_timestamp() -> None:
+    news_time = datetime(2026, 7, 6, 18, 51, tzinfo=timezone.utc)
+    transfer_time = news_time + timedelta(hours=1)
+    transfer = parse_btc_large_transfer(
+        _sample_tx(block_time=int(transfer_time.timestamp())),
+        block_height=956985,
+        block_hash="block-hash",
+        block_timestamp=int(transfer_time.timestamp()),
+        min_btc=500,
+    )
+    assert transfer is not None
+    signal = {
+        "id": "panews-blackrock-with-txid",
+        "title": "BlackRock sent BTC to Coinbase",
+        "summary": "PANews reported BlackRock transferred 4,917 BTC to Coinbase.",
+        "published_at": news_time.isoformat(),
+        "btc_amounts": [4917],
+        "txids": [transfer["txid"]],
+        "mentions_coinbase": True,
+        "mentions_blackrock_or_ibit": True,
+    }
+
+    matches = match_news_signal_to_large_transfers(signal, [transfer], window_hours=48, amount_tolerance_pct=8, max_matches=20)
+
+    assert matches
+    assert matches[0]["txid"] == transfer["txid"]
 
 
 def test_blackrock_case_matches_real_candidate_source_address() -> None:

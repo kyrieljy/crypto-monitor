@@ -12,6 +12,7 @@ import requests
 
 SATOSHI = 100_000_000
 DEFAULT_BLOCKSTREAM_BASE_URL = "https://blockstream.info/api"
+FUTURE_MATCH_GRACE = timedelta(minutes=5)
 
 
 class BtcLargeTransferError(RuntimeError):
@@ -180,6 +181,9 @@ def match_news_signal_to_large_transfers(
         transfer_time = _parse_datetime(str(transfer.get("block_time_utc") or ""))
         delta_hours = abs((signal_time - transfer_time).total_seconds()) / 3600
         if delta_hours > max(1, window_hours):
+            continue
+        txid_exact_match = _signal_mentions_txid(signal, str(transfer.get("txid") or ""))
+        if not txid_exact_match and transfer_time > signal_time + FUTURE_MATCH_GRACE:
             continue
         amount_score, amount_reasons, amount_delta_pct = _amount_match(signal, transfer, amount_tolerance_pct)
         if amount_score <= 0:
@@ -437,3 +441,13 @@ def _relative_delta(left: float, right: float) -> float:
 def normalize_btc_txid(value: str) -> str:
     text = value.strip()
     return text if re.fullmatch(r"[a-fA-F0-9]{64}", text) else ""
+
+
+def _signal_mentions_txid(signal: dict[str, Any], txid: str) -> bool:
+    normalized = normalize_btc_txid(txid)
+    if not normalized:
+        return False
+    for value in signal.get("txids", []) if isinstance(signal.get("txids"), list) else []:
+        if normalize_btc_txid(str(value)) == normalized:
+            return True
+    return False

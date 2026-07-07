@@ -837,7 +837,10 @@ class Store:
                 continue
             signal_id = str(signal.get("id") or "")
             matches = signal.get("large_transfer_matches") if isinstance(signal.get("large_transfer_matches"), list) else []
-            if not signal_id or not matches:
+            if not signal_id:
+                continue
+            self.db.execute("DELETE FROM btc_news_matches WHERE target_id = ? AND signal_id = ?", (target_id, signal_id))
+            if not matches:
                 continue
             for match in matches:
                 if not isinstance(match, dict):
