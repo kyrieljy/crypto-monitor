@@ -7,6 +7,9 @@ from typing import Any
 
 from ..api.schemas import (
     AlertEventOut,
+    BtcLargeTransferListOut,
+    BtcLargeTransferOut,
+    BtcLargeTransferStatsOut,
     DashboardLayout,
     DashboardModule,
     NewsEventOut,
@@ -55,6 +58,22 @@ def _slugify(value: str) -> str:
     return text[:64] or "whale-target"
 
 
+def _safe_int(value: Any, fallback: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _safe_float(value: Any, fallback: float = 0.0) -> float:
+    try:
+        if value in (None, ""):
+            return fallback
+        return float(value)
+    except (TypeError, ValueError):
+        return fallback
+
+
 MODULE_LAYOUT_DEFAULTS: dict[str, dict[str, int]] = {
     "charts": {"x": 0, "y": 0, "w": 12, "h": 16},
     "whale": {"x": 0, "y": 16, "w": 12, "h": 8},
@@ -71,6 +90,8 @@ SOURCE_HEALTH_LABELS = {
     "trumps_truth_rss": "TrumpTruth RSS",
     "hyperliquid": "Hyperliquid",
     "debank": "DeBank",
+    "blackrock_free": "IBIT 免费监控",
+    "btc_large_transfers": "BTC 大额底表",
 }
 
 
@@ -210,6 +231,7 @@ class Store:
                     type=row["type"],
                     enabled=bool(row["enabled"]),
                     secrets=secrets,
+                    config=_json_loads(row["config_json"], {}),
                     created_at=row["created_at"],
                     updated_at=row["updated_at"],
                 )
@@ -231,16 +253,26 @@ class Store:
         created_at = existing.created_at if existing else now
         self.db.execute(
             """
-            INSERT INTO notifier_targets (id, name, type, enabled, secret_json, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO notifier_targets (id, name, type, enabled, secret_json, config_json, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 name = excluded.name,
                 type = excluded.type,
                 enabled = excluded.enabled,
                 secret_json = excluded.secret_json,
+                config_json = excluded.config_json,
                 updated_at = excluded.updated_at
             """,
-            (notifier.id, notifier.name, notifier.type, int(notifier.enabled), encrypted, created_at, now),
+            (
+                notifier.id,
+                notifier.name,
+                notifier.type,
+                int(notifier.enabled),
+                encrypted,
+                json.dumps(dict(notifier.config or {}), ensure_ascii=False, sort_keys=True),
+                created_at,
+                now,
+            ),
         )
         saved = self.get_notifier(notifier.id, reveal=False)
         if saved is None:
@@ -644,6 +676,287 @@ class Store:
         self.state_set("cleanup_last_result", json.dumps(result, ensure_ascii=False, sort_keys=True))
         return result
 
+    def cleanup_btc_large_transfers(self, retention_days: int, *, now: datetime | None = None) -> int:
+        current = now or datetime.now(timezone.utc)
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=timezone.utc)
+        cutoff = (current.astimezone(timezone.utc) - timedelta(days=max(1, int(retention_days)))).isoformat()
+        old_txids = [str(row["txid"]) for row in self.db.query("SELECT txid FROM btc_large_transfers WHERE block_time_utc < ?", (cutoff,))]
+        if not old_txids:
+            return 0
+        for chunk in (old_txids[index:index + 500] for index in range(0, len(old_txids), 500)):
+            placeholders = ",".join("?" for _ in chunk)
+            self.db.execute(f"DELETE FROM btc_news_matches WHERE txid IN ({placeholders})", chunk)
+            self.db.execute(f"DELETE FROM btc_large_transfers WHERE txid IN ({placeholders})", chunk)
+        return len(old_txids)
+
+    def upsert_btc_large_transfer(self, transfer: dict[str, Any]) -> bool:
+        now = utc_now_iso()
+        cursor = self.db.execute(
+            """
+            INSERT OR IGNORE INTO btc_large_transfers (
+                txid, chain, asset, block_height, block_hash, block_time_utc,
+                amount, amount_btc, total_input_amount, total_output_amount,
+                fee_amount, total_input_btc, total_output_btc, fee_btc, input_addresses_json,
+                output_addresses_json, address_operations_json, exchange_hints_json,
+                source_url, raw_json, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                str(transfer.get("txid") or ""),
+                str(transfer.get("chain") or "btc").lower(),
+                str(transfer.get("asset") or "BTC").upper(),
+                int(transfer.get("block_height") or 0),
+                str(transfer.get("block_hash") or ""),
+                str(transfer.get("block_time_utc") or ""),
+                _safe_float(transfer.get("amount"), _safe_float(transfer.get("amount_btc"))),
+                _safe_float(transfer.get("amount_btc")),
+                _safe_float(transfer.get("total_input_amount"), _safe_float(transfer.get("total_input_btc"))),
+                _safe_float(transfer.get("total_output_amount"), _safe_float(transfer.get("total_output_btc"))),
+                _safe_float(transfer.get("fee_amount"), _safe_float(transfer.get("fee_btc"))),
+                _safe_float(transfer.get("total_input_btc")),
+                _safe_float(transfer.get("total_output_btc")),
+                _safe_float(transfer.get("fee_btc")),
+                json.dumps(transfer.get("input_addresses") or [], ensure_ascii=False, sort_keys=True),
+                json.dumps(transfer.get("output_addresses") or [], ensure_ascii=False, sort_keys=True),
+                json.dumps(transfer.get("address_operations") or [], ensure_ascii=False, sort_keys=True),
+                json.dumps(transfer.get("exchange_hints") or [], ensure_ascii=False, sort_keys=True),
+                str(transfer.get("source_url") or ""),
+                json.dumps(transfer.get("raw") or {}, ensure_ascii=False, sort_keys=True),
+                now,
+            ),
+        )
+        return cursor.rowcount > 0
+
+    def list_btc_large_transfers(
+        self,
+        *,
+        limit: int = 50,
+        offset: int = 0,
+        min_btc: float | None = None,
+        query: str = "",
+        matched_only: bool = False,
+    ) -> BtcLargeTransferListOut:
+        where: list[str] = []
+        params: list[Any] = []
+        if min_btc is not None and min_btc > 0:
+            where.append("amount >= ?")
+            params.append(float(min_btc))
+        query_text = query.strip()
+        if query_text:
+            where.append("(txid LIKE ? OR chain LIKE ? OR asset LIKE ? OR input_addresses_json LIKE ? OR output_addresses_json LIKE ?)")
+            like = f"%{query_text}%"
+            params.extend([like, like, like, like, like])
+        if matched_only:
+            where.append("EXISTS (SELECT 1 FROM btc_news_matches WHERE btc_news_matches.txid = btc_large_transfers.txid)")
+        where_sql = f"WHERE {' AND '.join(where)}" if where else ""
+        total = self.db.query_one(f"SELECT COUNT(*) AS count FROM btc_large_transfers {where_sql}", params)
+        rows = self.db.query(
+            f"""
+            SELECT btc_large_transfers.*,
+                   (SELECT COUNT(*) FROM btc_news_matches WHERE btc_news_matches.txid = btc_large_transfers.txid) AS match_count
+            FROM btc_large_transfers
+            {where_sql}
+            ORDER BY block_time_utc DESC, amount DESC
+            LIMIT ? OFFSET ?
+            """,
+            (*params, max(1, min(int(limit), 200)), max(0, int(offset))),
+        )
+        return BtcLargeTransferListOut(
+            items=[self._btc_transfer_from_row(row, include_matches=False) for row in rows],
+            total=int(total["count"] if total else 0),
+            limit=max(1, min(int(limit), 200)),
+            offset=max(0, int(offset)),
+        )
+
+    def get_btc_large_transfer(self, txid: str) -> BtcLargeTransferOut | None:
+        row = self.db.query_one(
+            """
+            SELECT btc_large_transfers.*,
+                   (SELECT COUNT(*) FROM btc_news_matches WHERE btc_news_matches.txid = btc_large_transfers.txid) AS match_count
+            FROM btc_large_transfers
+            WHERE txid = ?
+            """,
+            (txid,),
+        )
+        if row is None:
+            return None
+        return self._btc_transfer_from_row(row, include_matches=True)
+
+    def btc_large_transfer_stats(self, *, min_btc: float = 500.0, min_eth: float = 5000.0) -> BtcLargeTransferStatsOut:
+        today = datetime.now(timezone.utc).date().isoformat()
+        total = self.db.query_one("SELECT COUNT(*) AS count FROM btc_large_transfers")
+        today_count = self.db.query_one("SELECT COUNT(*) AS count FROM btc_large_transfers WHERE block_time_utc >= ?", (today,))
+        latest = self.db.query_one("SELECT block_height, block_time_utc FROM btc_large_transfers WHERE chain = 'btc' ORDER BY block_height DESC LIMIT 1")
+        latest_eth = self.db.query_one("SELECT block_height, block_time_utc FROM btc_large_transfers WHERE chain = 'eth' ORDER BY block_height DESC LIMIT 1")
+        matched = self.db.query_one("SELECT COUNT(DISTINCT txid) AS count FROM btc_news_matches")
+        scanned_height = _safe_int(self.state_get("btc_large_transfers:last_scanned_height"))
+        eth_scanned_height = _safe_int(self.state_get("eth_large_transfers:last_scanned_height"))
+        return BtcLargeTransferStatsOut(
+            total=int(total["count"] if total else 0),
+            today_count=int(today_count["count"] if today_count else 0),
+            latest_block_height=int(latest["block_height"]) if latest else None,
+            latest_eth_block_height=int(latest_eth["block_height"]) if latest_eth else None,
+            latest_scanned_height=scanned_height if scanned_height > 0 else None,
+            latest_eth_scanned_height=eth_scanned_height if eth_scanned_height > 0 else None,
+            latest_scan_time=self.state_get("btc_large_transfers:last_scan_at"),
+            latest_eth_scan_time=self.state_get("eth_large_transfers:last_scan_at"),
+            min_btc=float(min_btc),
+            min_eth=float(min_eth),
+            matched_count=int(matched["count"] if matched else 0),
+        )
+
+    def list_btc_large_transfer_candidates(
+        self,
+        *,
+        start_utc: str,
+        end_utc: str,
+        min_btc: float,
+        limit: int = 500,
+    ) -> list[dict[str, Any]]:
+        rows = self.db.query(
+            """
+            SELECT btc_large_transfers.*,
+                   (SELECT COUNT(*) FROM btc_news_matches WHERE btc_news_matches.txid = btc_large_transfers.txid) AS match_count
+            FROM btc_large_transfers
+            WHERE block_time_utc BETWEEN ? AND ?
+              AND amount >= ?
+            ORDER BY amount DESC, block_time_utc DESC
+            LIMIT ?
+            """,
+            (start_utc, end_utc, float(min_btc), max(1, min(int(limit), 1000))),
+        )
+        return [self._btc_transfer_from_row(row, include_matches=False).model_dump() for row in rows]
+
+    def save_btc_news_matches(self, target_id: str, signals: list[dict[str, Any]]) -> int:
+        inserted = 0
+        now = utc_now_iso()
+        for signal in signals:
+            if not isinstance(signal, dict):
+                continue
+            signal_id = str(signal.get("id") or "")
+            matches = signal.get("large_transfer_matches") if isinstance(signal.get("large_transfer_matches"), list) else []
+            if not signal_id or not matches:
+                continue
+            for match in matches:
+                if not isinstance(match, dict):
+                    continue
+                txid = str(match.get("txid") or "")
+                address = str(match.get("candidate_address") or "")
+                role = str(match.get("address_role") or "unknown")
+                if not txid or not address:
+                    continue
+                cursor = self.db.execute(
+                    """
+                    INSERT OR IGNORE INTO btc_news_matches (
+                        target_id, signal_id, txid, candidate_address, address_role,
+                        confidence, reasons_json, signal_json, transfer_json,
+                        published_at_utc, matched_at_utc
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        target_id,
+                        signal_id,
+                        txid,
+                        address,
+                        role,
+                        float(match.get("confidence") or 0),
+                        json.dumps(match.get("reasons") or [], ensure_ascii=False, sort_keys=True),
+                        json.dumps(signal, ensure_ascii=False, sort_keys=True),
+                        json.dumps(match.get("transfer") or {}, ensure_ascii=False, sort_keys=True),
+                        str(signal.get("published_at") or ""),
+                        now,
+                    ),
+                )
+                inserted += int(cursor.rowcount > 0)
+        return inserted
+
+    def confirm_btc_address_for_target(self, target_id: str, address: str, *, role: str = "candidate", label: str | None = None) -> WhaleTargetOut:
+        row = self.db.query_one("SELECT * FROM whale_targets WHERE id = ?", (target_id,))
+        if row is None:
+            raise KeyError(target_id)
+        address_text = address.strip()
+        if not address_text:
+            raise ValueError("empty address")
+        config = _json_loads(row["config_json"], {})
+        key = "btc_addresses" if role == "confirmed" else "suspected_btc_addresses"
+        values = [str(item).strip() for item in config.get(key, []) if str(item).strip()]
+        lowered = {item.lower() for item in values}
+        if address_text.lower() not in lowered:
+            values.append(address_text)
+        config[key] = values
+        label_text = str(label or "").strip()
+        if label_text:
+            labels = config.get("btc_address_labels")
+            if not isinstance(labels, dict):
+                labels = {}
+            labels[address_text] = label_text
+            config["btc_address_labels"] = labels
+        self.db.execute(
+            "UPDATE whale_targets SET config_json = ?, updated_at = ? WHERE id = ?",
+            (json.dumps(config, ensure_ascii=False, sort_keys=True), utc_now_iso(), target_id),
+        )
+        target = self.get_whale_target(target_id)
+        if target is None:
+            raise KeyError(target_id)
+        return target
+
+    def _btc_transfer_from_row(self, row: Any, *, include_matches: bool) -> BtcLargeTransferOut:
+        txid = str(row["txid"])
+        matches = []
+        if include_matches:
+            match_rows = self.db.query(
+                """
+                SELECT * FROM btc_news_matches
+                WHERE txid = ?
+                ORDER BY confidence DESC, published_at_utc DESC
+                LIMIT 30
+                """,
+                (txid,),
+            )
+            matches = [
+                {
+                    "target_id": match["target_id"],
+                    "signal_id": match["signal_id"],
+                    "candidate_address": match["candidate_address"],
+                    "address_role": match["address_role"],
+                    "confidence": float(match["confidence"] or 0),
+                    "reasons": _json_loads(match["reasons_json"], []),
+                    "signal": _json_loads(match["signal_json"], {}),
+                    "transfer": _json_loads(match["transfer_json"], {}),
+                    "published_at_utc": match["published_at_utc"],
+                    "matched_at_utc": match["matched_at_utc"],
+                }
+                for match in match_rows
+            ]
+        return BtcLargeTransferOut(
+            txid=txid,
+            chain=str(row["chain"] or "btc"),
+            asset=str(row["asset"] or "BTC"),
+            block_height=int(row["block_height"]),
+            block_hash=row["block_hash"],
+            block_time_utc=row["block_time_utc"],
+            amount=_safe_float(row["amount"], _safe_float(row["amount_btc"])),
+            amount_btc=float(row["amount_btc"] or 0),
+            total_input_amount=_safe_float(row["total_input_amount"], _safe_float(row["total_input_btc"])),
+            total_output_amount=_safe_float(row["total_output_amount"], _safe_float(row["total_output_btc"])),
+            fee_amount=_safe_float(row["fee_amount"], _safe_float(row["fee_btc"])),
+            total_input_btc=float(row["total_input_btc"] or 0),
+            total_output_btc=float(row["total_output_btc"] or 0),
+            fee_btc=float(row["fee_btc"] or 0),
+            input_addresses=_json_loads(row["input_addresses_json"], []),
+            output_addresses=_json_loads(row["output_addresses_json"], []),
+            address_operations=_json_loads(row["address_operations_json"], []),
+            exchange_hints=_json_loads(row["exchange_hints_json"], []),
+            source_url=row["source_url"],
+            raw=_json_loads(row["raw_json"], {}),
+            match_count=int(row["match_count"] or 0) if "match_count" in row.keys() else len(matches),
+            matches=matches,
+            created_at=row["created_at"],
+        )
+
     def list_pending_alert_notifications(self):
         return self.db.query("SELECT * FROM alert_events WHERE notification_sent = 0 ORDER BY id ASC LIMIT 30")
 
@@ -772,7 +1085,13 @@ class Store:
                 }
                 config["last_snapshot_at"] = snapshot.get("updated_at")
                 account = snapshot.get("account_summary") if isinstance(snapshot.get("account_summary"), dict) else {}
-                config["current_operation_amount"] = account.get("contract_notional") or account.get("total_balance") or config.get("current_operation_amount")
+                config["current_operation_amount"] = (
+                    account.get("contract_notional")
+                    or account.get("blackrock_last_flow_usd")
+                    or account.get("blackrock_official_net_assets")
+                    or account.get("total_balance")
+                    or config.get("current_operation_amount")
+                )
             result.append(
                 WhaleTargetOut(
                     id=row["id"],

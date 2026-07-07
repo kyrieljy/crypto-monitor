@@ -3,8 +3,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import threading
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -13,6 +16,15 @@ from fastapi.staticfiles import StaticFiles
 
 from .api.schemas import (
     AlertEventOut,
+    BtcAddressConfirmRequest,
+    BtcLargeTransferListOut,
+    BtcLargeTransferOut,
+    BtcLargeTransferRescanRequest,
+    BtcLargeTransferRescanResponse,
+    BtcLargeTransferStatsOut,
+    IbitHistorySyncRequest,
+    IbitHistorySyncJobStatus,
+    IbitHistorySyncResponse,
     DashboardLayout,
     DashboardModule,
     KlineOut,
@@ -69,6 +81,145 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+_IBIT_HISTORY_JOBS: dict[str, dict[str, Any]] = {}
+_IBIT_HISTORY_JOBS_LOCK = threading.Lock()
+_IBIT_HISTORY_JOB_LIMIT = 30
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _clamp_progress(value: Any) -> float:
+    try:
+        return max(0.0, min(100.0, float(value)))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _int_value(value: Any, fallback: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _create_ibit_history_job(target_id: str) -> dict[str, Any]:
+    now = _now_iso()
+    job = {
+        "job_id": uuid.uuid4().hex,
+        "target_id": target_id,
+        "status": "pending",
+        "stage": "排队中",
+        "message": "等待开始回扫",
+        "progress": 0.0,
+        "current": 0,
+        "total": 100,
+        "started_at": now,
+        "updated_at": now,
+        "completed_at": None,
+        "result": None,
+    }
+    with _IBIT_HISTORY_JOBS_LOCK:
+        _IBIT_HISTORY_JOBS[job["job_id"]] = job
+        _prune_ibit_history_jobs_locked()
+    return dict(job)
+
+
+def _prune_ibit_history_jobs_locked() -> None:
+    if len(_IBIT_HISTORY_JOBS) <= _IBIT_HISTORY_JOB_LIMIT:
+        return
+    terminal_jobs = sorted(
+        (
+            (job_id, job)
+            for job_id, job in _IBIT_HISTORY_JOBS.items()
+            if job.get("status") in {"completed", "failed"}
+        ),
+        key=lambda item: str(item[1].get("updated_at") or ""),
+    )
+    for job_id, _job in terminal_jobs:
+        if len(_IBIT_HISTORY_JOBS) <= _IBIT_HISTORY_JOB_LIMIT:
+            break
+        _IBIT_HISTORY_JOBS.pop(job_id, None)
+
+
+def _update_ibit_history_job(job_id: str, **fields: Any) -> None:
+    allowed = {"status", "stage", "message", "progress", "current", "total", "completed_at", "result"}
+    with _IBIT_HISTORY_JOBS_LOCK:
+        job = _IBIT_HISTORY_JOBS.get(job_id)
+        if job is None:
+            return
+        for key, value in fields.items():
+            if key not in allowed:
+                continue
+            if key == "progress":
+                value = _clamp_progress(value)
+            elif key in {"current", "total"}:
+                value = _int_value(value)
+            job[key] = value
+        job["updated_at"] = _now_iso()
+
+
+def _get_ibit_history_job(job_id: str) -> dict[str, Any]:
+    with _IBIT_HISTORY_JOBS_LOCK:
+        job = _IBIT_HISTORY_JOBS.get(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="IBIT 回扫任务不存在")
+        return dict(job)
+
+
+def _run_ibit_history_job(job_id: str, target_id: str, lookback_days: int, max_news_items: int) -> None:
+    def progress_callback(update: dict[str, Any]) -> None:
+        if not isinstance(update, dict):
+            return
+        payload: dict[str, Any] = {"status": "running"}
+        for key in ("stage", "message", "progress", "current", "total"):
+            if key in update:
+                payload[key] = update[key]
+        _update_ibit_history_job(job_id, **payload)
+        LOGGER.info(
+            "IBIT history sync progress job=%s target=%s stage=%s progress=%.0f current=%s total=%s message=%s",
+            job_id,
+            target_id,
+            str(payload.get("stage") or ""),
+            _clamp_progress(payload.get("progress")),
+            payload.get("current", ""),
+            payload.get("total", ""),
+            str(payload.get("message") or "")[:200],
+        )
+
+    _update_ibit_history_job(job_id, status="running", stage="准备回扫", message="正在初始化 IBIT 历史回扫", progress=1, current=0, total=100)
+    try:
+        result = WhaleRunner(store, bus, settings.request_timeout_seconds).sync_ibit_history_now(
+            target_id,
+            lookback_days=lookback_days,
+            max_news_items=max_news_items,
+            progress_callback=progress_callback,
+        )
+    except KeyError:
+        message = "关注对象不存在"
+        _update_ibit_history_job(job_id, status="failed", stage="失败", message=message, progress=100, completed_at=_now_iso())
+    except ValueError as exc:
+        _update_ibit_history_job(job_id, status="failed", stage="失败", message=str(exc), progress=100, completed_at=_now_iso())
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("IBIT历史回扫后台任务失败 target=%s job=%s", target_id, job_id)
+        message = str(exc)[:500]
+        result = {"ok": False, "target_id": target_id, "lookback_days": lookback_days, "message": message}
+        _update_ibit_history_job(job_id, status="failed", stage="失败", message=message, progress=100, completed_at=_now_iso(), result=result)
+    else:
+        message = str(result.get("message") or "回扫完成")
+        _update_ibit_history_job(
+            job_id,
+            status="completed",
+            stage="完成",
+            message=message,
+            progress=100,
+            current=100,
+            total=100,
+            completed_at=_now_iso(),
+            result=result,
+        )
 
 
 def require_admin(authorization: Annotated[str | None, Header()] = None) -> None:
@@ -148,6 +299,7 @@ def put_notifiers(items: list[NotifierUpsert], _: None = Depends(require_admin))
                 type=item.type,
                 enabled=item.enabled,
                 secrets=item.secrets,
+                config=item.config,
                 created_at="",
                 updated_at="",
             )
@@ -258,12 +410,134 @@ def delete_whale_target(target_id: str, _: None = Depends(require_admin)) -> dic
     return {"ok": True}
 
 
+@app.post("/api/whales/{target_id}/btc-addresses/confirm", response_model=WhaleTargetOut)
+def confirm_whale_btc_address(target_id: str, payload: BtcAddressConfirmRequest, _: None = Depends(require_admin)) -> WhaleTargetOut:
+    try:
+        return store.confirm_btc_address_for_target(target_id, payload.address, role=payload.role, label=payload.label)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="关注对象不存在") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/whales/{target_id}/ibit-history-sync", response_model=IbitHistorySyncResponse)
+def sync_ibit_history(target_id: str, payload: IbitHistorySyncRequest, _: None = Depends(require_admin)) -> IbitHistorySyncResponse:
+    try:
+        result = WhaleRunner(store, bus, settings.request_timeout_seconds).sync_ibit_history_now(
+            target_id,
+            lookback_days=payload.lookback_days,
+            max_news_items=payload.max_news_items,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="关注对象不存在") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("IBIT历史回扫失败 target=%s", target_id)
+        return IbitHistorySyncResponse(ok=False, target_id=target_id, lookback_days=payload.lookback_days, message=str(exc)[:500])
+    return IbitHistorySyncResponse(**result)
+
+
+@app.post("/api/whales/{target_id}/ibit-history-sync/jobs", response_model=IbitHistorySyncJobStatus)
+def start_ibit_history_job(target_id: str, payload: IbitHistorySyncRequest, _: None = Depends(require_admin)) -> IbitHistorySyncJobStatus:
+    if store.get_whale_target(target_id) is None:
+        raise HTTPException(status_code=404, detail="关注对象不存在")
+    job = _create_ibit_history_job(target_id)
+    thread = threading.Thread(
+        target=_run_ibit_history_job,
+        args=(job["job_id"], target_id, payload.lookback_days, payload.max_news_items),
+        daemon=True,
+        name=f"ibit-history-{str(target_id)[:8]}",
+    )
+    thread.start()
+    return IbitHistorySyncJobStatus(**job)
+
+
+@app.get("/api/whales/{target_id}/ibit-history-sync/jobs/{job_id}", response_model=IbitHistorySyncJobStatus)
+def get_ibit_history_job(target_id: str, job_id: str, _: None = Depends(require_admin)) -> IbitHistorySyncJobStatus:
+    job = _get_ibit_history_job(job_id)
+    if job.get("target_id") != target_id:
+        raise HTTPException(status_code=404, detail="IBIT 回扫任务不存在")
+    return IbitHistorySyncJobStatus(**job)
+
+
 @app.get("/api/whales/{target_id}", response_model=WhaleDetailOut)
 def get_whale_detail(target_id: str) -> WhaleDetailOut:
     detail = store.get_whale_detail(target_id)
     if detail is None:
         raise HTTPException(status_code=404, detail="关注地址不存在")
     return detail
+
+
+@app.get("/api/btc/large-transfers", response_model=BtcLargeTransferListOut)
+def get_btc_large_transfers(
+    limit: int = 50,
+    offset: int = 0,
+    min_btc: float | None = None,
+    query: str = "",
+    matched_only: bool = False,
+) -> BtcLargeTransferListOut:
+    return store.list_btc_large_transfers(limit=limit, offset=offset, min_btc=min_btc, query=query, matched_only=matched_only)
+
+
+@app.get("/api/btc/large-transfers/stats", response_model=BtcLargeTransferStatsOut)
+def get_btc_large_transfer_stats() -> BtcLargeTransferStatsOut:
+    strategy = store.get_strategy("whale")
+    config = strategy.config if strategy else {}
+    min_btc = float(config.get("btc_candidate_min_btc") or 500)
+    min_eth = float(config.get("eth_candidate_min_eth") or 5000)
+    return store.btc_large_transfer_stats(min_btc=min_btc, min_eth=min_eth)
+
+
+@app.get("/api/btc/large-transfers/{txid}", response_model=BtcLargeTransferOut)
+def get_btc_large_transfer(txid: str) -> BtcLargeTransferOut:
+    transfer = store.get_btc_large_transfer(txid)
+    if transfer is None:
+        raise HTTPException(status_code=404, detail="BTC 大额交易不存在")
+    return transfer
+
+
+@app.post("/api/btc/large-transfers/rescan", response_model=BtcLargeTransferRescanResponse)
+def rescan_btc_large_transfers(payload: BtcLargeTransferRescanRequest, _: None = Depends(require_admin)) -> BtcLargeTransferRescanResponse:
+    try:
+        runner = WhaleRunner(store, bus, settings.request_timeout_seconds)
+        result = runner.sync_btc_large_transfers_now(
+            blocks=payload.blocks,
+            start_utc=payload.start_utc,
+            end_utc=payload.end_utc,
+            max_blocks=payload.max_blocks,
+        )
+        strategy = store.get_strategy("whale")
+        config = strategy.config if strategy else {}
+        eth_result: dict[str, Any] = {}
+        eth_message = ""
+        if bool(config.get("eth_candidate_monitor_enabled", True)) and bool(config.get("etherscan_enabled", False)):
+            try:
+                eth_result = runner.sync_eth_large_transfers_now(
+                    blocks=payload.blocks,
+                    start_utc=payload.start_utc,
+                    end_utc=payload.end_utc,
+                    max_blocks=payload.max_blocks,
+                )
+            except Exception as exc:  # noqa: BLE001
+                eth_message = f"ETH scan skipped: {str(exc)[:300]}"
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("BTC 大额底表手动补扫失败")
+        return BtcLargeTransferRescanResponse(ok=False, message=str(exc)[:500])
+    return BtcLargeTransferRescanResponse(
+        ok=bool(result.get("ok")),
+        scanned_blocks=int(result.get("scanned_blocks") or 0),
+        scanned_eth_blocks=int(eth_result.get("scanned_blocks") or 0),
+        inserted=int(result.get("inserted") or 0),
+        inserted_eth=int(eth_result.get("inserted") or 0),
+        latest_height=result.get("latest_height"),
+        latest_eth_height=eth_result.get("latest_height"),
+        start_height=result.get("start_height"),
+        end_height=result.get("end_height"),
+        start_eth_height=eth_result.get("start_height"),
+        end_eth_height=eth_result.get("end_height"),
+        message="; ".join(item for item in (str(result.get("message") or ""), eth_message, str(eth_result.get("message") or "")) if item),
+    )
 
 
 @app.get("/api/market/klines/{symbol}/{interval}", response_model=list[KlineOut])

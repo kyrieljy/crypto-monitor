@@ -42,6 +42,7 @@ class NotifierTarget(BaseModel):
     type: Literal["feishu", "telegram"]
     enabled: bool
     secrets: dict[str, str] = Field(default_factory=dict)
+    config: dict[str, Any] = Field(default_factory=dict)
     created_at: str
     updated_at: str
 
@@ -52,6 +53,7 @@ class NotifierUpsert(BaseModel):
     type: Literal["feishu", "telegram"]
     enabled: bool
     secrets: dict[str, str] = Field(default_factory=dict)
+    config: dict[str, Any] = Field(default_factory=dict)
 
 
 class NotifierTestResponse(BaseModel):
@@ -199,3 +201,111 @@ class WhaleDetailOut(BaseModel):
     account_summary: dict[str, Any] = Field(default_factory=dict)
     snapshot: dict[str, Any] = Field(default_factory=dict)
     updated_at: str | None = None
+
+
+class BtcLargeTransferOut(BaseModel):
+    txid: str
+    chain: str = "btc"
+    asset: str = "BTC"
+    block_height: int
+    block_hash: str
+    block_time_utc: str
+    amount: float = 0
+    amount_btc: float
+    total_input_amount: float = 0
+    total_output_amount: float = 0
+    fee_amount: float = 0
+    total_input_btc: float
+    total_output_btc: float
+    fee_btc: float
+    input_addresses: list[dict[str, Any]] = Field(default_factory=list)
+    output_addresses: list[dict[str, Any]] = Field(default_factory=list)
+    address_operations: list[dict[str, Any]] = Field(default_factory=list)
+    exchange_hints: list[str] = Field(default_factory=list)
+    source_url: str
+    raw: dict[str, Any] = Field(default_factory=dict)
+    match_count: int = 0
+    matches: list[dict[str, Any]] = Field(default_factory=list)
+    created_at: str
+
+
+class BtcLargeTransferListOut(BaseModel):
+    items: list[BtcLargeTransferOut]
+    total: int
+    limit: int
+    offset: int
+
+
+class BtcLargeTransferStatsOut(BaseModel):
+    total: int
+    today_count: int
+    latest_block_height: int | None = None
+    latest_eth_block_height: int | None = None
+    latest_scanned_height: int | None = None
+    latest_eth_scanned_height: int | None = None
+    latest_scan_time: str | None = None
+    latest_eth_scan_time: str | None = None
+    min_btc: float
+    min_eth: float = 0
+    matched_count: int
+
+
+class BtcLargeTransferRescanRequest(BaseModel):
+    blocks: int | None = Field(default=3, ge=1, le=50)
+    start_utc: str | None = None
+    end_utc: str | None = None
+    max_blocks: int = Field(default=24, ge=1, le=288)
+
+
+class BtcLargeTransferRescanResponse(BaseModel):
+    ok: bool
+    scanned_blocks: int = 0
+    scanned_eth_blocks: int = 0
+    inserted: int = 0
+    inserted_eth: int = 0
+    latest_height: int | None = None
+    latest_eth_height: int | None = None
+    start_height: int | None = None
+    end_height: int | None = None
+    start_eth_height: int | None = None
+    end_eth_height: int | None = None
+    message: str = ""
+
+
+class BtcAddressConfirmRequest(BaseModel):
+    address: str
+    role: Literal["candidate", "confirmed"] = "candidate"
+    label: str | None = None
+
+
+class IbitHistorySyncRequest(BaseModel):
+    lookback_days: int = Field(default=30, ge=1, le=90)
+    max_news_items: int = Field(default=300, ge=10, le=1000)
+
+
+class IbitHistorySyncResponse(BaseModel):
+    ok: bool
+    target_id: str
+    lookback_days: int
+    address_count: int = 0
+    account_operation_count: int = 0
+    news_signal_count: int = 0
+    matched_address_count: int = 0
+    large_transfer_match_count: int = 0
+    eth_large_transfer_inserted: int = 0
+    message: str = ""
+
+
+class IbitHistorySyncJobStatus(BaseModel):
+    job_id: str
+    target_id: str
+    status: Literal["pending", "running", "completed", "failed"]
+    stage: str = ""
+    message: str = ""
+    progress: float = 0
+    current: int = 0
+    total: int = 0
+    started_at: str
+    updated_at: str
+    completed_at: str | None = None
+    result: IbitHistorySyncResponse | None = None

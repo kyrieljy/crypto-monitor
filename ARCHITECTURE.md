@@ -1,49 +1,30 @@
-# 架构说明
+# Architecture
+
+更新日期：2026-05-26
 
 ## 总览
 
-项目是一个本地运行的全栈监控系统：
+系统是一个单进程 FastAPI 应用，负责：
 
-- 前端负责交易终端式看板、后台配置、二级巨鲸详情页。
-- 后端负责配置存储、行情/新闻/策略 worker、通知发送、SSE 实时推送、静态前端托管。
-- SQLite 保存业务配置、事件、布局、健康状态和敏感字段密文。
+- 提供 REST API 和 SSE。
+- 托管 Vite 构建后的静态前端。
+- 启动后台 worker 轮询行情、策略、新闻、通知、清理和巨鲸数据。
+- 使用 SQLite 保存配置、事件、快照、状态和布局。
 
 ```text
-React/Vite UI
-  -> REST API / SSE
-FastAPI
-  -> Store / SQLite
-  -> MarketDataRouter -> Binance Futures / OKX
-  -> TechnicalStrategyRunner -> KDJ / MA / BOLL
-  -> NewsRunner -> Trump RSS / Truthbrush / White House
-  -> Translator -> OpenAI-compatible LLM
-  -> NotificationWorker -> Feishu / Telegram
-  -> Whale API adapter (待实现)
+Browser
+  -> React / Vite static assets
+  -> REST API /api/*
+  -> SSE /api/stream
+
+FastAPI backend
+  -> Store
+  -> SQLite
+  -> Market providers: Binance Futures / OKX
+  -> News providers: Trump RSS / Truth detail / White House
+  -> Whale providers: Hyperliquid / DeBank optional
+  -> Notification providers: Feishu / Telegram
 ```
-
-## 技术栈
-
-前端：
-
-- React 18
-- TypeScript 5
-- Vite 6
-- React Query
-- `react-grid-layout`
-- `lightweight-charts`
-- `lucide-react`
-
-后端：
-
-- Python
-- FastAPI
-- Uvicorn
-- SQLite
-- Pydantic v2
-- `requests`
-- `python-dotenv`
-- `cryptography`
-- 后台 `asyncio` worker
 
 ## 目录结构
 
@@ -51,47 +32,52 @@ FastAPI
 market-monitor-dashboard/
   backend/
     app/
-      main.py                 FastAPI 路由、worker 启停、静态前端托管
-      api/schemas.py          API 入参/出参模型
+      main.py
+      api/
+        schemas.py
       core/
-        database.py           SQLite schema、默认数据、迁移
-        security.py           管理员 token、敏感字段加密/脱敏
-        settings.py           启动级配置
-        time.py               时间工具
-        text.py               新闻去重文本工具
+        database.py
+        security.py
+        settings.py
+        text.py
+        time.py
       services/
-        store.py              数据访问层
-        market_data.py        行情数据源路由和灾备
-        indicators.py         KDJ/MA/BOLL 指标计算
-        strategies.py         技术策略轮询
-        news.py               新闻源抓取/解析/分类
-        news_runner.py        新闻轮询
-        translator.py         大模型翻译
-        notifiers.py          飞书/Telegram 发送
-        notification_worker.py 告警/新闻推送 worker 和机器人模板
-        events.py             SSE 事件总线
+        cleanup_worker.py
+        events.py
+        indicators.py
+        market_data.py
+        news.py
+        news_runner.py
+        notification_worker.py
+        notifiers.py
+        strategies.py
+        store.py
+        translator.py
+        whale.py
+        whale_runner.py
       tests/
   frontend/
     src/
-      App.tsx                 主界面、后台、巨鲸详情页主要逻辑
-      styles.css              全局样式和响应式布局
+      App.tsx
+      main.tsx
+      styles.css
       components/
-        CoinChart.tsx         K 线图组件
-        Panel.tsx             面板容器
-        Switch.tsx            独立开关按钮
+        CoinChart.tsx
+        Panel.tsx
+        Switch.tsx
       lib/
-        api.ts                API client
-        format.ts             展示格式化工具
-      types/api.ts            前端 API 类型
+        api.ts
+        format.ts
+      types/
+        api.ts
+    dist/
   data/
-    app.db                    SQLite 数据库
-  logs/
-  README.md
+    app.db
 ```
 
-## 后端启动与生命周期
+## 后端生命周期
 
-`backend/app/main.py` 在模块加载时创建：
+`backend/app/main.py` 在应用启动时创建核心对象：
 
 - `Database`
 - `Store`
@@ -100,30 +86,66 @@ market-monitor-dashboard/
 - `NotificationService`
 - `Translator`
 
-FastAPI `startup` 时如果 `RUN_WORKERS` 开启，会启动：
+当 `RUN_WORKERS=true` 时，FastAPI startup 会启动：
 
 - `TechnicalStrategyRunner`
 - `NewsRunner`
 - `NotificationWorker`
+- `CleanupWorker`
+- `WhaleRunner`
 
-`shutdown` 时取消 worker 并关闭数据库。
+shutdown 时会取消这些任务并关闭数据库连接。
 
-## 数据库表
+## 配置边界
+
+`.env` 只放启动级配置：
+
+- `DATABASE_PATH`
+- `HOST`
+- `PORT`
+- `APP_SECRET_KEY`
+- `ADMIN_PASSWORD`
+- `RUN_WORKERS`
+- `REQUEST_TIMEOUT_SECONDS`
+
+业务配置都存 SQLite 并由后台页面管理：
+
+- 币种
+- KDJ/MA/BOLL 参数
+- 新闻源
+- 翻译配置
+- 清理策略
+- 巨鲸 provider 配置
+- 机器人目标和绑定
+- 看板模块和布局
+
+敏感字段用 `APP_SECRET_KEY` 加密保存，API 返回 masked 值。
+
+## SQLite 数据模型
 
 核心表：
 
 - `symbols`：关注币种。
-- `strategy_configs`：KDJ、MA、BOLL、新闻、翻译、巨鲸配置。
-- `notifier_targets`：Webhook/Telegram 机器人目标，敏感字段加密。
-- `strategy_notifier_bindings`：策略到机器人绑定。
-- `dashboard_modules`：看板模块开关、标题、模块级配置。
-- `dashboard_layouts`：看板布局和主题。
-- `alert_events`：技术策略告警事件。
-- `news_events`：新闻/社媒事件，含翻译、去重、通知状态。
-- `source_health`：数据源健康状态和最后错误。
-- `app_state`：迁移版本、翻译/巨鲸 API key 等状态。
-- `whale_targets`：关注的巨鲸/聪明钱地址或对象。
-- `whale_events`：巨鲸动作事件骨架表。
+- `strategy_configs`：策略配置，包括 `kdj`、`ma`、`boll`、`trump_social`、`whitehouse`、`translation`、`cleanup`、`whale`。
+- `notifier_targets`：机器人目标，含飞书/Telegram 敏感字段密文。
+- `strategy_notifier_bindings`：策略和机器人绑定。
+- `dashboard_modules`：模块开关、标题、模块级配置。
+- `dashboard_layouts`：布局和主题。
+- `alert_events`：技术策略告警。
+- `news_events`：新闻/社媒事件，含翻译、去重、通知状态、`metadata_json`。
+- `source_health`：行情/新闻/巨鲸 provider 健康状态。
+- `app_state`：全局状态，例如迁移版本、清理日期、Hyperliquid 游标。
+- `whale_targets`：关注对象和地址。
+- `whale_snapshots`：关注对象最新快照。
+- `whale_events`：巨鲸动态事件，含去重 key 和通知状态。
+
+`whale_events` 已增加：
+
+- `event_key`
+- `notification_required`
+- `notification_sent`
+- `notification_attempts`
+- `last_notification_error`
 
 ## REST API
 
@@ -131,171 +153,267 @@ FastAPI `startup` 时如果 `RUN_WORKERS` 开启，会启动：
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| `POST` | `/api/auth/login` | 管理员登录，返回 Bearer token |
+| `POST` | `/api/auth/login` | 管理员登录，返回 bearer token |
 
-配置：
-
-| 方法 | 路径 | 说明 |
-| --- | --- | --- |
-| `GET` | `/api/settings/symbols` | 获取关注币种 |
-| `PUT` | `/api/settings/symbols` | 保存关注币种，需登录 |
-| `GET` | `/api/strategies/{strategy_id}` | 获取策略配置 |
-| `PUT` | `/api/strategies/{strategy_id}` | 保存策略配置，需登录 |
-| `GET` | `/api/notifiers` | 获取机器人目标，敏感字段脱敏 |
-| `PUT` | `/api/notifiers` | 保存机器人目标，需登录 |
-| `POST` | `/api/notifiers/{notifier_id}/test` | 测试机器人，需登录 |
-| `GET` | `/api/dashboard/modules` | 获取模块配置 |
-| `PUT` | `/api/dashboard/modules` | 保存模块显示配置，需登录 |
-| `GET` | `/api/dashboard/layout` | 获取布局 |
-| `PUT` | `/api/dashboard/layout` | 保存布局，需登录 |
-
-事件和看板：
+看板：
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| `GET` | `/api/snapshot` | 首页一次性快照 |
+| `GET` | `/api/snapshot` | 首页完整快照 |
+| `GET` | `/api/stream` | SSE 事件流 |
+| `GET` | `/api/health/sources` | 数据源健康 |
+| `GET` | `/api/market/klines/{symbol}/{interval}?limit=600` | K 线数据 |
+
+事件：
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
 | `GET` | `/api/events/alerts` | 技术告警列表 |
 | `GET` | `/api/events/news` | 新闻/社媒列表 |
-| `POST` | `/api/events/news/translate` | 一键翻译指定新闻，需登录 |
-| `GET` | `/api/health/sources` | 数据源健康 |
-| `GET` | `/api/market/klines/{symbol}/{interval}` | K 线数据 |
-| `GET` | `/api/stream` | SSE 推送新事件和心跳 |
+| `POST` | `/api/events/news/translate` | 手动翻译新闻，需登录 |
+
+后台配置：
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| `GET` | `/api/settings/symbols` | 获取币种 |
+| `PUT` | `/api/settings/symbols` | 保存币种，需登录 |
+| `GET` | `/api/strategies/{strategy_id}` | 获取策略 |
+| `PUT` | `/api/strategies/{strategy_id}` | 保存策略，需登录 |
+| `GET` | `/api/notifiers` | 获取机器人目标 |
+| `PUT` | `/api/notifiers` | 保存机器人目标，需登录 |
+| `POST` | `/api/notifiers/{id}/test` | 测试机器人，需登录，不能未经确认调用真实 webhook |
+| `GET` | `/api/dashboard/modules` | 获取模块配置 |
+| `PUT` | `/api/dashboard/modules` | 保存模块配置，需登录 |
+| `GET` | `/api/dashboard/layout` | 获取布局 |
+| `PUT` | `/api/dashboard/layout` | 保存布局，需登录 |
 
 巨鲸：
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| `GET` | `/api/whales` | 关注地址列表 |
-| `GET` | `/api/whales/{target_id}` | 地址二级详情页数据 |
+| `GET` | `/api/whales` | 关注对象列表 |
+| `POST` | `/api/whales/resolve` | 从地址/链接/昵称解析候选 |
+| `PUT` | `/api/whales` | 保存关注对象 |
+| `DELETE` | `/api/whales/{target_id}` | 删除关注对象 |
+| `GET` | `/api/whales/{target_id}` | 巨鲸详情 |
 
-## 策略架构
+## 行情和策略架构
 
-KDJ：
+`DataSourceRouter` 负责行情源路由：
 
-- 策略 ID：`kdj`
-- 保留 J 上穿/下穿 K。
-- 默认参数：`period=26`、`k_smoothing=20`、`d_smoothing=9`。
-- 支持多周期。
-- 默认按闭合 K 线告警，可配置实时 K 线。
+- Binance Futures 优先。
+- OKX 作为备份。
+- 失败时写入 `source_health`。
+- 前端显示当前生效源。
 
-MA：
+策略：
 
-- 策略 ID：`ma`
-- 保留快慢均线穿越。
-- 默认 `MA25/MA99`。
-- 支持多周期提醒配置。
-- 支持实时 K 线开关。
+- KDJ：J 上穿/下穿 K。
+- MA：快慢均线穿越，当前主要是 MA25/MA99，图表也显示 MA7。
+- BOLL：收盘价上穿上轨或下穿下轨。
 
-BOLL：
+策略事件进入 `alert_events`。通知 worker 根据绑定关系发送到机器人。
 
-- 策略 ID：`boll`
-- 默认 `period=20`、`stddev=2`。
-- 检查收盘价上穿上轨或下穿下轨。
-- 去重维度：币种 + 周期 + 方向 + K 线时间。
-- 支持实时 K 线开关。
+前台展示周期和后台推送周期是两个概念：
 
-## 周期语义
+- 前台展示周期：用户当前看哪个周期。
+- 后台推送周期：哪些周期会触发机器人提醒。
 
-周期有两个不同含义，不能混淆：
+## 新闻和社媒架构
 
-- 首页展示周期：前台选择当前看哪个周期的数据和提醒。
-- 后台机器人提醒周期：决定哪些周期会推送到机器人。
+新闻 worker 拉取：
 
-用户要求前台看板“所有周期都监控，用户选择看”；后台只控制机器人提醒哪些周期。
+- Trump Truth RSS
+- Truth detail page enrich
+- White House source
 
-## 行情数据源
+解析流程：
 
-行情通过 `DataSourceRouter` 获取。
+```text
+RSS/source item
+  -> HTML text extraction
+  -> suspicious media/repost/link detection
+  -> detail page enrich
+  -> metadata_json media/card/original_url/original_id
+  -> de-duplicate
+  -> optional translation
+  -> news_events
+  -> NotificationWorker
+```
 
-当前看板支持主源/灾备概念：
+`metadata_json` 约定：
 
-- 币安 Futures 优先。
-- OKX 可作为备用。
-- 当灾备生效时，前台显示当前生效数据源。
+```json
+{
+  "content_kind": "text|image|video|repost|link|media",
+  "original_url": "https://truthsocial.com/@realDonaldTrump/posts/...",
+  "original_id": "...",
+  "links": [],
+  "media": [],
+  "card": {
+    "title": "",
+    "description": "",
+    "translated_description": "",
+    "url": "",
+    "image": ""
+  }
+}
+```
 
-数据源健康写入 `source_health`，前端显示中文解释。
+前端优先展示：
 
-## 新闻架构
+1. 翻译正文。
+2. 可用中文摘要。
+3. 卡片翻译描述。
+4. 媒体/转发提示。
 
-Trump 社媒：
+前端必须过滤翻译失败提示词，不显示模型错误解释。
 
-- 策略 ID：`trump_social`
-- 默认 RSS 优先。
-- Truthbrush 可选，默认不建议同时打开以避免重复。
-- 分类字段用于机器人推送和看板展示。
+## 巨鲸架构
 
-White House：
+第一版 provider：
 
-- 策略 ID：`whitehouse`
-- 使用 White House Gallery。
-- 后台支持 include/exclude keywords。
+- Hyperliquid：公开只读 Info endpoint，合约主源。
+- DeBank：多链资产/DeFi，可选，需要 AccessKey。
+- Etherscan/Alchemy：后续用于 EVM 大额转账。
+- Nansen/Arkham：后续用于聪明钱标签和实体归因。
+
+数据流：
+
+```text
+whale_targets
+  -> WhaleRunner
+  -> HyperliquidProvider
+  -> whale_snapshots latest state
+  -> whale_events normalized events
+  -> NotificationWorker
+```
+
+Hyperliquid provider 当前能力：
+
+- 持仓：`clearinghouseState`
+- 价格补全：`allMids`
+- 标记价格/资金费/OI：`metaAndAssetCtxs`
+- 当前委托：`frontendOpenOrders`
+- 历史订单：`historicalOrders`
+- 最近成交：`userFills`
+- 增量成交：`userFillsByTime`
+- 资金费：`userFunding`
+- 出入金/转账流水：`userNonFundingLedgerUpdates`
+- 账户组合：`portfolio`
+- 手续费：`userFees`
 
 去重：
 
-- `news_events` 对同源 `event_id` 和 `url` 做唯一约束。
-- `content_hash` 和文本相似规则用于跨源合并。
+- 成交事件用 `target_id + address + hash/tid/oid/time` 生成稳定 `event_key`。
+- 首次同步只建立游标，不补发历史通知。
+- 后续增量事件进入 `whale_events`。
 
-翻译：
+轮询频率保守值：
 
-- 策略 ID：`translation`
-- OpenAI-compatible API。
-- 当前模型名应使用 `deepseek-v4-flash`。
-- 翻译只处理新闻/社媒，不是通知机器人。
+- 主轮询最小 300 秒。
+- 成交轮询最小 120 秒。
+- 扩展信息轮询最小 1800 秒。
 
-## 通知架构
+## 清理架构
 
-通知 flow：
+`CleanupWorker` 每分钟检查一次本地时间是否达到配置时间。
 
-```text
-alert_events/news_events
-  -> NotificationWorker 读取未发送事件
-  -> 根据 strategy_notifier_bindings 找 notifier
-  -> notification_worker.py 生成机器人专用模板
-  -> notifiers.py 发送飞书/Telegram
-  -> 写回 notification_sent / attempts / last_notification_error
+默认配置：
+
+```json
+{
+  "enabled": true,
+  "schedule_time": "12:30",
+  "timezone": "Asia/Shanghai",
+  "alert_retention_days": 30,
+  "news_retention_days": 60,
+  "whale_retention_days": 90,
+  "delete_pending_notifications": true,
+  "vacuum_after_cleanup": true
+}
 ```
 
-机器人推送模板与前台看板文案分离：
+清理范围：
 
-- 前台保持短格式，便于每个币卡片显示。
-- 机器人使用详细模板，含标的、周期、信号、指标值、K 线时间、数据源、提醒时间。
+- `alert_events.created_at`
+- `news_events.published_at_utc`
+- `whale_events.occurred_at_utc`
+
+不清理：
+
+- 策略配置
+- 机器人目标
+- 看板配置
+- app state
+- 数据源健康
+- 最新巨鲸快照
 
 ## 前端架构
 
-主入口是 `frontend/src/App.tsx`，目前集中承载：
+主文件仍集中在 `frontend/src/App.tsx`，包含：
 
-- 应用壳和侧边栏。
-- 看板首页。
-- 后台登录和管理页。
-- 行情与策略监控。
-- 新闻模块。
-- 巨鲸列表和二级详情页。
-- 弹框提示。
+- App shell
+- Dashboard
+- Admin
+- Market strategy panel
+- News panels
+- Whale list/detail
+- Dialogs
 
 重要组件：
 
-- `CoinChart.tsx`：K 线图，基于 `lightweight-charts`。
-- `Switch.tsx`：独立开关按钮，避免点击整行误触发。
-- `Panel.tsx`：统一面板容器。
+- `CoinChart.tsx`：K 线图和指标线，基于 lightweight-charts。
+- `Panel.tsx`：通用面板。
+- `Switch.tsx`：独立开关，避免整行误触。
 
-响应式和动画主要在 `frontend/src/styles.css`。
+用户个人 UI 状态应保存在本地浏览器：
 
-## 巨鲸/聪明钱计划架构
+- 主题
+- 拖拽布局
+- 当前周期
+- 图表指标模式
 
-当前只完成骨架：
+全局状态才保存到后端：
 
-- `whale_targets` 保存关注对象。
-- `whale_events` 保存动作事件。
-- `/api/whales` 和 `/api/whales/{id}` 返回列表和详情。
-- 前端有首页模块和二级详情页。
+- 策略配置
+- 机器人配置
+- 翻译结果
+- 新闻元数据
+- 关注对象
 
-下一步推荐增加：
+## 部署架构
 
-- `WhaleProvider` adapter interface。
-- provider 配置：`provider`、`base_url`、`api_key`、`poll_seconds`。
-- 后台 CRUD：关注地址、标签、启停、通知绑定。
-- Worker：按 provider 拉取地址动作、持仓、委托、成交。
-- 入库：标准化为 address action、position snapshot、holding snapshot。
-- 通知：大额动作、开仓/平仓、加仓/减仓、清仓等模板。
+当前没有 Nginx/TLS，直接由 Uvicorn 对外暴露 8800。
 
-在真实 API 文档确认前，不要伪造真实监控能力。
+因此：
+
+- 正确访问：`http://167.179.69.248:8800/`
+- `https://167.179.69.248:8800/` 不可用，除非后续配置 TLS 或反向代理。
+
+systemd 负责后台常驻、开机自启、崩溃重启。
+
+## 测试入口
+
+后端：
+
+```powershell
+D:\market-monitor-dashboard\.venv\Scripts\python.exe -m pytest D:\market-monitor-dashboard\backend\app\tests -q
+```
+
+前端：
+
+```powershell
+cd D:\market-monitor-dashboard\frontend
+npm.cmd run build
+```
+
+服务器：
+
+```bash
+cd /root/crypto-monitor/frontend
+npm run build
+sudo systemctl restart crypto-monitor
+sudo systemctl status crypto-monitor --no-pager
+```

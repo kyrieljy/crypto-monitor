@@ -23,6 +23,7 @@ export interface NotifierTarget {
   type: "feishu" | "telegram";
   enabled: boolean;
   secrets: Record<string, string>;
+  config: Record<string, any>;
   created_at: string;
   updated_at: string;
 }
@@ -158,4 +159,94 @@ export interface WhaleDetail {
   account_summary: Record<string, any>;
   snapshot: Record<string, any>;
   updated_at?: string | null;
+}
+
+export interface BtcLargeTransfer {
+  txid: string;
+  chain: string;
+  asset: string;
+  block_height: number;
+  block_hash: string;
+  block_time_utc: string;
+  amount: number;
+  amount_btc: number;
+  total_input_amount: number;
+  total_output_amount: number;
+  fee_amount: number;
+  total_input_btc: number;
+  total_output_btc: number;
+  fee_btc: number;
+  input_addresses: Array<Record<string, any>>;
+  output_addresses: Array<Record<string, any>>;
+  address_operations: Array<Record<string, any>>;
+  exchange_hints: string[];
+  source_url: string;
+  raw: Record<string, any>;
+  match_count: number;
+  matches: Array<Record<string, any>>;
+  created_at: string;
+}
+
+export interface BtcLargeTransferList {
+  items: BtcLargeTransfer[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export interface BtcLargeTransferStats {
+  total: number;
+  today_count: number;
+  latest_block_height?: number | null;
+  latest_eth_block_height?: number | null;
+  latest_scanned_height?: number | null;
+  latest_eth_scanned_height?: number | null;
+  latest_scan_time?: string | null;
+  latest_eth_scan_time?: string | null;
+  min_btc: number;
+  min_eth: number;
+  matched_count: number;
+}
+
+export interface BtcLargeTransferRescanResult {
+  ok: boolean;
+  scanned_blocks: number;
+  scanned_eth_blocks: number;
+  inserted: number;
+  inserted_eth: number;
+  latest_height?: number | null;
+  latest_eth_height?: number | null;
+  start_height?: number | null;
+  end_height?: number | null;
+  start_eth_height?: number | null;
+  end_eth_height?: number | null;
+  message: string;
+}
+
+export interface IbitHistorySyncResult {
+  ok: boolean;
+  target_id: string;
+  lookback_days: number;
+  address_count: number;
+  account_operation_count: number;
+  news_signal_count: number;
+  matched_address_count: number;
+  large_transfer_match_count: number;
+  eth_large_transfer_inserted?: number;
+  message: string;
+}
+
+export interface IbitHistorySyncJobStatus {
+  job_id: string;
+  target_id: string;
+  status: "pending" | "running" | "completed" | "failed";
+  stage: string;
+  message: string;
+  progress: number;
+  current: number;
+  total: number;
+  started_at: string;
+  updated_at: string;
+  completed_at?: string | null;
+  result?: IbitHistorySyncResult | null;
 }

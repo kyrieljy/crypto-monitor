@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 from backend.app.api.schemas import WhaleTargetUpsert
 from backend.app.core.database import Database
 from backend.app.services.store import Store
-from backend.app.services.whale import DeBankProvider, HyperliquidProvider, WhaleSnapshot, extract_addresses, resolve_address_candidates
+from backend.app.services.whale import BlackRockFreeProvider, DeBankProvider, HyperliquidProvider, WhaleSnapshot, extract_addresses, extract_btc_addresses, resolve_address_candidates
 from backend.app.services.whale_runner import WhaleRunner
 
 
@@ -137,6 +138,218 @@ def test_debank_fixtures_are_normalized() -> None:
     assert defi[0]["item_count"] == 2
 
 
+def test_blackrock_free_sources_are_normalized() -> None:
+    ishares_html = """
+    <div>Net Assets of Fund</div><div>$44,947,000,000</div><div>as of Jul 02, 2026</div>
+    <div>Benchmark Level</div><div>$62,171.32</div>
+    <div>Shares Outstanding</div><div>765,000,000</div>
+    <div>Basket Bitcoin Amount</div><div>40.12</div>
+    """
+    farside_html = """
+    <table>
+      <tr><th>Total</th><th>IBIT</th><th>FBTC</th><th>BTC</th><th>Fee</th></tr>
+      <tr><td>0.25</td><td>0.25</td><td>0.25</td><td>0.25</td></tr>
+      <tr><td>02 Jul 2026</td><td>300.1</td><td>166.0</td><td>12.3</td><td>0.0</td></tr>
+    </table>
+    """
+
+    official = BlackRockFreeProvider.parse_ishares_page(ishares_html)
+    flow = BlackRockFreeProvider.parse_farside_flows(farside_html)
+    escaped_ishares_html = """
+    &quot;totalNetAssetsFundLevel&quot;:{&quot;label&quot;:&quot;Net Assets of Fund&quot;,&quot;formattedValue&quot;:&quot;44,947,412,010&quot;,&quot;value&quot;:&quot;44947412010.18&quot;,&quot;formattedAsOfDate&quot;:&quot;Jul 02, 2026&quot;},
+    &quot;levelAmount&quot;:{&quot;label&quot;:&quot;Benchmark Level&quot;,&quot;formattedValue&quot;:&quot;62,171.32&quot;,&quot;formattedAsOfDate&quot;:&quot;Jul 03, 2026&quot;},
+    &quot;sharesOutstanding&quot;:{&quot;label&quot;:&quot;Shares Outstanding&quot;,&quot;formattedValue&quot;:&quot;1,289,600,000&quot;,&quot;formattedAsOfDate&quot;:&quot;Jul 02, 2026&quot;},
+    &quot;basketAmt&quot;:{&quot;label&quot;:&quot;Basket Bitcoin Amount&quot;,&quot;formattedValue&quot;:&quot;22.66&quot;,&quot;formattedAsOfDate&quot;:&quot;Jul 02, 2026&quot;},
+    &quot;indicativeBasketAmt&quot;:{&quot;label&quot;:&quot;Indicative Basket Bitcoin Amount&quot;,&quot;formattedValue&quot;:&quot;22.64&quot;,&quot;formattedAsOfDate&quot;:&quot;Jul 02, 2026&quot;}
+    """
+    official_from_page_json = BlackRockFreeProvider.parse_ishares_page(escaped_ishares_html)
+
+    assert official["net_assets"] == 44947000000
+    assert official["benchmark_price"] == 62171.32
+    assert round(official["estimated_btc_holdings"], 2) == round(44947000000 / 62171.32, 2)
+    assert official_from_page_json["as_of"] == "Jul 02, 2026"
+    assert official_from_page_json["net_assets"] == 44947412010
+    assert official_from_page_json["benchmark_price"] == 62171.32
+    assert official_from_page_json["shares_outstanding"] == 1289600000
+    assert official_from_page_json["basket_btc"] == 22.66
+    assert official_from_page_json["indicative_basket_btc"] == 22.64
+    assert round(official_from_page_json["estimated_btc_holdings"], 2) == round(44947412010 / 62171.32, 2)
+    assert flow["date"] == "02 Jul 2026"
+    assert flow["ibit_flow_usd_m"] == 166.0
+
+
+def test_blackrock_free_btc_cluster_transfer_parser() -> None:
+    watched = {"bc1qblackrock0000000000000000000000000000000"}
+    tx = {
+        "txid": "btc-tx-1",
+        "status": {"confirmed": True, "block_time": 1779760800},
+        "vin": [
+            {
+                "prevout": {
+                    "scriptpubkey_address": "bc1qblackrock0000000000000000000000000000000",
+                    "value": 150_000_000_000,
+                }
+            }
+        ],
+        "vout": [
+            {"scriptpubkey_address": "bc1qcoinbase00000000000000000000000000000000", "value": 120_000_000_000},
+            {"scriptpubkey_address": "bc1qblackrock0000000000000000000000000000000", "value": 20_000_000_000},
+        ],
+    }
+
+    transfer = BlackRockFreeProvider.parse_btc_cluster_transfer(tx, watched)
+
+    assert transfer is not None
+    assert transfer["txid"] == "btc-tx-1"
+    assert transfer["direction"] == "out"
+    assert transfer["amount_btc"] == 1300
+    assert transfer["external_outputs"][0]["address"] == "bc1qcoinbase00000000000000000000000000000000"
+
+
+def test_btc_address_operation_parser_tracks_each_address_action() -> None:
+    address = "bc1qblackrock0000000000000000000000000000000"
+    tx = {
+        "txid": "btc-tx-2",
+        "status": {"confirmed": True, "block_time": 1779760800},
+        "vin": [{"prevout": {"scriptpubkey_address": address, "value": 150_000_000_000}}],
+        "vout": [
+            {"scriptpubkey_address": "bc1qcoinbase00000000000000000000000000000000", "value": 120_000_000_000},
+            {"scriptpubkey_address": address, "value": 20_000_000_000},
+        ],
+    }
+
+    operation = BlackRockFreeProvider.parse_btc_address_operation(tx, address)
+
+    assert operation is not None
+    assert operation["direction"] == "out"
+    assert operation["behavior"] == "转出"
+    assert operation["amount_btc"] == 1300
+    assert operation["net_btc"] == -1300
+    assert operation["output_counterparties"][0]["address"] == "bc1qcoinbase00000000000000000000000000000000"
+
+
+def test_ibit_news_feed_candidates_extract_txid_addresses_and_amounts(monkeypatch) -> None:
+    txid = "a" * 64
+    source_address = "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080"
+    rss = f"""<?xml version="1.0" encoding="UTF-8"?>
+    <rss><channel><item>
+      <title>贝莱德 IBIT 地址向 Coinbase 存入 4,917 枚 BTC</title>
+      <link>https://example.com/news/ibit</link>
+      <guid>ibit-news-1</guid>
+      <pubDate>Mon, 06 Jul 2026 06:00:00 GMT</pubDate>
+      <description>据 OnchainLens 监测，BlackRock IBIT 相关交易 txid {txid}，价值约 3.01 亿美元，地址 {source_address}</description>
+    </item></channel></rss>"""
+    provider = BlackRockFreeProvider()
+    monkeypatch.setattr(provider, "_get_text", lambda url: rss)
+    monkeypatch.setattr(
+        provider,
+        "_get_json",
+        lambda path: {
+            "txid": txid,
+            "status": {"confirmed": True, "block_time": 1783317600},
+            "vin": [{"prevout": {"scriptpubkey_address": source_address, "value": 491_700_000_000}}],
+            "vout": [{"scriptpubkey_address": "1BoatSLRHtKNngkdXEeobR76b53LETtpyT", "value": 491_700_000_000}],
+        },
+    )
+
+    signals = provider.fetch_news_signals(["https://example.com/rss"], keywords=["IBIT", "贝莱德"], lookback_hours=24 * 30, max_items=10)
+
+    assert len(signals) == 1
+    signal = signals[0]
+    assert signal["txids"] == [txid]
+    assert source_address in signal["candidate_addresses"]
+    assert signal["btc_amounts"] == [4917]
+    assert signal["usd_amounts"] == [301_000_000]
+    assert signal["mentions_coinbase"] is True
+    assert signal["confidence"] >= 0.8
+    assert signal["tx_candidates"][0]["input_addresses"] == [source_address]
+
+    suspected = BlackRockFreeProvider.build_suspected_addresses(signals)
+    assert suspected[0]["address"] == source_address
+    assert suspected[0]["confidence"] == signal["confidence"]
+    assert suspected[0]["signals"][0]["behavior"] == "新闻称向 Coinbase 存入/转入"
+    assert suspected[0]["txids"] == [txid]
+
+
+def test_ibit_news_feed_extracts_eth_amounts_and_evm_addresses(monkeypatch) -> None:
+    evm_address = "0x1111111111111111111111111111111111111111"
+    rss = f"""<?xml version="1.0" encoding="UTF-8"?>
+    <rss><channel><item>
+      <title>BlackRock associated wallet moved 2,700 BTC and 52,956 ETH to Coinbase</title>
+      <link>https://example.com/news/blackrock-eth</link>
+      <guid>blackrock-eth-news-1</guid>
+      <pubDate>Mon, 06 Jul 2026 06:00:00 GMT</pubDate>
+      <description>OnchainLens reported the BlackRock related address {evm_address} transferred 52,956 ETH to Coinbase.</description>
+    </item></channel></rss>"""
+    provider = BlackRockFreeProvider()
+    monkeypatch.setattr(provider, "_get_text", lambda url: rss)
+
+    signals = provider.fetch_news_signals(["https://example.com/rss"], keywords=["BlackRock", "ETH"], lookback_hours=24 * 30, max_items=10)
+
+    assert len(signals) == 1
+    signal = signals[0]
+    assert signal["btc_amounts"] == [2700]
+    assert signal["eth_amounts"] == [52956]
+    assert signal["evm_addresses"] == [evm_address]
+    assert evm_address in signal["candidate_addresses"]
+    assert signal["mentions_coinbase"] is True
+    assert signal["mentions_blackrock_or_ibit"] is True
+
+
+def test_suspected_address_pool_matches_news_by_similar_operation() -> None:
+    address = "bc1qcandidate0000000000000000000000000000000"
+    unrelated_address = "bc1qunrelated000000000000000000000000000000"
+    signal = {
+        "id": "blockbeats-onchainlens-2026-07-02",
+        "title": "贝莱德ETF地址向Coinbase存入4917枚BTC，价值约3.01亿美元",
+        "summary": "BlockBeats 消息，7月2日，据 OnchainLens 监测，贝莱德 ETF 地址向 Coinbase 存入 4,917 枚 BTC，价值约 3.01 亿美元。近4天贝莱德已累计向 Coinbase 存入 20,359 枚 BTC。",
+        "published_at": "2026-07-02T11:22:00+00:00",
+        "confidence": 0.6,
+        "candidate_addresses": [],
+        "txids": [],
+        "btc_amounts": [4917],
+        "usd_amounts": [301_000_000],
+        "mentions_coinbase": True,
+    }
+    matching_operation = {
+        "address": address,
+        "txid": "btc-tx-match",
+        "direction": "out",
+        "behavior": "转出",
+        "amount_btc": 4917,
+        "net_btc": -4917,
+        "timestamp": "2026-07-02T11:10:00+00:00",
+        "timestamp_ms": 1782990600000,
+    }
+    unrelated_operation = {
+        "address": unrelated_address,
+        "txid": "btc-tx-unrelated",
+        "direction": "in",
+        "behavior": "转入",
+        "amount_btc": 120,
+        "net_btc": 120,
+        "timestamp": "2026-07-01T00:00:00+00:00",
+        "timestamp_ms": 1782864000000,
+    }
+
+    suspected = BlackRockFreeProvider.build_suspected_addresses(
+        [signal],
+        candidate_activity={
+            address: [matching_operation],
+            unrelated_address: [unrelated_operation],
+        },
+    )
+
+    assert suspected[0]["address"] == address
+    assert suspected[0]["confidence"] >= 0.7
+    assert suspected[0]["latest_operations"][0]["txid"] == "btc-tx-match"
+    assert suspected[0]["signals"][0]["operation"]["txid"] == "btc-tx-match"
+    assert "BTC 数量接近新闻金额" in suspected[0]["reasons"]
+    assert "链上转出方向与新闻行为一致" in suspected[0]["reasons"]
+    assert suspected[1]["address"] == unrelated_address
+    assert suspected[1]["confidence"] == 0.1
+
+
 def test_address_resolver_extracts_links_and_local_candidates() -> None:
     address = "0x1111111111111111111111111111111111111111"
     assert extract_addresses(f"https://app.hyperliquid.xyz/explorer/address/{address}") == [address]
@@ -147,6 +360,10 @@ def test_address_resolver_extracts_links_and_local_candidates() -> None:
 
     assert direct[0]["source"] == "etherscan_link"
     assert by_name[0]["target_id"] == "machi"
+
+
+def test_extract_btc_addresses() -> None:
+    assert extract_btc_addresses("watch bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080 now") == ["bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080"]
 
 
 def test_store_upserts_whale_target_and_runner_generates_events(tmp_path: Path) -> None:
@@ -350,3 +567,271 @@ def test_sync_target_now_forces_extended_snapshot(monkeypatch, tmp_path: Path) -
     assert snapshot["positions"][0]["coin"] == "ETH"
     assert snapshot["historical_orders"][0]["coin"] == "ETH"
     assert snapshot["funding"][0]["amount"] == -1
+
+
+def test_blackrock_free_target_sync_records_btc_event_once(monkeypatch, tmp_path: Path) -> None:
+    store = Store(Database(tmp_path / "test.db", "secret"))
+    strategy = store.get_strategy("whale")
+    assert strategy is not None
+    config = dict(strategy.config)
+    config.update(
+        {
+            "enabled": True,
+            "blackrock_free_enabled": True,
+            "blackrock_free_notification_enabled": True,
+            "blackrock_btc_transfer_min_btc": 1000,
+        }
+    )
+    store.update_strategy("whale", True, config, None)
+    target = store.upsert_whale_target(
+        WhaleTargetUpsert(
+            id="blackrock-free",
+            label="IBIT 免费监控",
+            address_or_subject="IBIT",
+            enabled=True,
+            config={
+                "provider": "blackrock_free_monitor",
+                "btc_addresses": ["bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080"],
+            },
+        )
+    )
+
+    class FakeBlackRockFreeProvider:
+        source_name = "blackrock_free"
+        label = "IBIT Free Monitor"
+
+        def __init__(self, **kwargs):  # noqa: ANN001
+            pass
+
+        def fetch(self, *, btc_addresses, transfer_min_btc, transfer_lookback_hours, **kwargs):  # noqa: ANN001
+            assert btc_addresses == ["bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080"]
+            assert transfer_min_btc == 1000
+            return WhaleSnapshot(
+                holdings=[{"symbol": "IBIT-BTC", "value": 44_947_000_000}],
+                account_summary={
+                    "source": "blackrock_free",
+                    "blackrock_official_net_assets": 44_947_000_000,
+                    "blackrock_last_flow_date": "02 Jul 2026",
+                    "blackrock_last_flow_usd": 166_000_000,
+                    "blackrock_btc_cluster_address_count": 1,
+                },
+                source_status={"ishares": {"ok": True}, "farside": {"ok": True}, "btc_cluster": {"ok": True}},
+                raw={
+                    "btc_cluster": {
+                        "transfers": [
+                            {
+                                "txid": "btc-tx-1",
+                                "amount_btc": 1300,
+                                "timestamp_ms": 1779760800000,
+                                "source_url": "https://blockstream.info/tx/btc-tx-1",
+                            }
+                        ]
+                    }
+                },
+            )
+
+    monkeypatch.setattr("backend.app.services.whale_runner.BlackRockFreeProvider", FakeBlackRockFreeProvider)
+
+    runner = WhaleRunner(store, bus=None)  # type: ignore[arg-type]
+    runner.sync_target_now(target.id, force_extended=True)
+    runner.sync_target_now(target.id, force_extended=True)
+
+    events = store.db.query("SELECT provider, action_type, notification_required, summary FROM whale_events WHERE target_id = ?", (target.id,))
+    assert len(events) == 1
+    assert events[0]["provider"] == "blackrock_free"
+    assert events[0]["action_type"] == "blackrock_confirmed_btc_outflow"
+    assert events[0]["notification_required"] == 0
+    assert "1300 BTC" in events[0]["summary"]
+    snapshot = store.get_whale_snapshot(target.id)
+    assert snapshot["account_summary"]["blackrock_last_flow_usd"] == 166_000_000
+    listed = next(item for item in store.list_whale_targets() if item.id == target.id)
+    assert listed.config["current_operation_amount"] == 166_000_000
+
+
+def test_ibit_news_candidate_event_is_recorded_once(monkeypatch, tmp_path: Path) -> None:
+    store = Store(Database(tmp_path / "test.db", "secret"))
+    strategy = store.get_strategy("whale")
+    assert strategy is not None
+    config = dict(strategy.config)
+    config.update(
+        {
+            "enabled": True,
+            "blackrock_free_enabled": True,
+            "blackrock_free_notification_enabled": True,
+            "ibit_news_enabled": True,
+            "ibit_news_candidate_notify_min_confidence": 0.6,
+            "ibit_news_rss_urls": ["https://example.com/rss"],
+        }
+    )
+    store.update_strategy("whale", True, config, None)
+    target = store.upsert_whale_target(
+        WhaleTargetUpsert(
+            id="ibit-free",
+            label="IBIT 免费监控",
+            address_or_subject="IBIT",
+            enabled=True,
+            config={"provider": "blackrock_free_monitor"},
+        )
+    )
+    store.save_whale_snapshot(
+        target.id,
+        {
+            "account_summary": {"source": "blackrock_free", "ibit_news_candidate_count": 1},
+            "raw": {"news_signals": {"signals": [{"id": "old-news", "title": "旧新闻线索"}]}},
+        },
+    )
+
+    class FakeBlackRockFreeProvider:
+        source_name = "blackrock_free"
+        label = "IBIT Free Monitor"
+
+        def __init__(self, **kwargs):  # noqa: ANN001
+            pass
+
+        def fetch(self, **kwargs):  # noqa: ANN001
+            assert kwargs["news_enabled"] is True
+            assert kwargs["news_feed_urls"] == ["https://example.com/rss"]
+            return WhaleSnapshot(
+                account_summary={"source": "blackrock_free", "ibit_news_candidate_count": 1},
+                source_status={"news_signals": {"ok": True, "signals": 1}},
+                raw={
+                    "news_signals": {
+                        "signals": [
+                            {
+                                "id": "news-1",
+                                "title": "IBIT 地址向 Coinbase 存入 BTC",
+                                "published_at": "2026-07-06T06:00:00+00:00",
+                                "confidence": 0.85,
+                                "candidate_addresses": ["bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080"],
+                                "txids": ["a" * 64],
+                                "reasons": ["包含 txid", "提到 Coinbase"],
+                                "url": "https://example.com/news/1",
+                            }
+                        ]
+                    }
+                },
+            )
+
+    monkeypatch.setattr("backend.app.services.whale_runner.BlackRockFreeProvider", FakeBlackRockFreeProvider)
+
+    runner = WhaleRunner(store, bus=None)  # type: ignore[arg-type]
+    runner.sync_target_now(target.id, force_extended=True)
+    runner.sync_target_now(target.id, force_extended=True)
+
+    events = store.db.query("SELECT action_type, notification_required, summary FROM whale_events WHERE target_id = ?", (target.id,))
+    assert len(events) == 1
+    assert events[0]["action_type"] == "ibit_news_address_candidate"
+    assert events[0]["notification_required"] == 1
+    assert "新闻线索" in events[0]["summary"]
+
+
+def test_blackrock_ibit_notification_switches_are_independent(tmp_path: Path) -> None:
+    event_switches = {
+        "blackrock_etf_flow": "blackrock_etf_flow_notification_enabled",
+        "blackrock_confirmed_btc_outflow": "blackrock_btc_outflow_notification_enabled",
+        "blackrock_btc_address_operation": "blackrock_btc_address_operation_notification_enabled",
+        "ibit_news_address_candidate": "ibit_news_candidate_notification_enabled",
+    }
+
+    def record_with(enabled_key: str | None) -> dict[str, int]:
+        store = Store(Database(tmp_path / f"{enabled_key or 'none'}.db", "secret"))
+        runner = WhaleRunner(store, bus=None)  # type: ignore[arg-type]
+        target = SimpleNamespace(id="ibit-free", label="IBIT 免费监控")
+        base_config = {
+            "blackrock_free_notification_enabled": True,
+            "blackrock_etf_flow_notification_enabled": False,
+            "blackrock_btc_outflow_notification_enabled": False,
+            "blackrock_btc_address_operation_notification_enabled": False,
+            "ibit_news_candidate_notification_enabled": False,
+            "ibit_news_candidate_notify_min_confidence": 0.6,
+            "blackrock_initial_notification_enabled": True,
+            "ibit_news_initial_notification_enabled": True,
+        }
+        if enabled_key:
+            base_config[enabled_key] = True
+        old_snapshot = {
+            "account_summary": {"blackrock_last_flow_date": "01 Jul 2026"},
+            "raw": {"news_signals": {"signals": [{"id": "old-news"}]}},
+        }
+        new_snapshot = {
+            "account_summary": {
+                "blackrock_last_flow_date": "02 Jul 2026",
+                "blackrock_last_flow_usd": 166_000_000,
+            },
+            "raw": {
+                "btc_cluster": {
+                    "transfers": [
+                        {
+                            "txid": "btc-transfer-1",
+                            "amount_btc": 1300,
+                            "timestamp_ms": 1779760800000,
+                        }
+                    ],
+                    "address_activity": {
+                        "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080": [
+                            {
+                                "txid": "btc-operation-1",
+                                "direction": "in",
+                                "behavior": "转入",
+                                "amount_btc": 300,
+                                "net_btc": 300,
+                                "timestamp_ms": 1779760860000,
+                            }
+                        ]
+                    },
+                },
+                "news_signals": {
+                    "signals": [
+                        {
+                            "id": "news-1",
+                            "title": "IBIT 地址向 Coinbase 存入 BTC",
+                            "published_at": "2026-07-06T06:00:00+00:00",
+                            "confidence": 0.85,
+                            "candidate_addresses": ["bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080"],
+                        }
+                    ]
+                },
+            },
+        }
+        runner._record_blackrock_free_events(target, old_snapshot, new_snapshot, base_config, initial=False)  # noqa: SLF001
+        rows = store.db.query("SELECT action_type, notification_required FROM whale_events WHERE target_id = ?", (target.id,))
+        return {row["action_type"]: int(row["notification_required"]) for row in rows}
+
+    all_disabled = record_with(None)
+    assert set(all_disabled) == set(event_switches)
+    assert all(value == 0 for value in all_disabled.values())
+
+    for event_type, switch_key in event_switches.items():
+        result = record_with(switch_key)
+        assert result[event_type] == 1
+        for other_type in set(event_switches) - {event_type}:
+            assert result[other_type] == 0
+
+
+def test_ibit_notification_switches_persist_false_after_strategy_save(tmp_path: Path) -> None:
+    store = Store(Database(tmp_path / "test.db", "secret"))
+    strategy = store.get_strategy("whale")
+    assert strategy is not None
+    config = dict(strategy.config)
+    config.update(
+        {
+            "blackrock_free_enabled": True,
+            "blackrock_btc_address_operation_notification_enabled": False,
+            "blackrock_btc_outflow_notification_enabled": False,
+            "ibit_news_candidate_notification_enabled": False,
+            "blackrock_etf_flow_notification_enabled": False,
+        }
+    )
+
+    saved = store.update_strategy("whale", True, config, strategy.notifier_id)
+    reloaded = store.get_strategy("whale")
+
+    assert saved.config["blackrock_btc_address_operation_notification_enabled"] is False
+    assert saved.config["blackrock_btc_outflow_notification_enabled"] is False
+    assert saved.config["ibit_news_candidate_notification_enabled"] is False
+    assert saved.config["blackrock_etf_flow_notification_enabled"] is False
+    assert reloaded is not None
+    assert reloaded.config["blackrock_btc_address_operation_notification_enabled"] is False
+    assert reloaded.config["blackrock_btc_outflow_notification_enabled"] is False
+    assert reloaded.config["ibit_news_candidate_notification_enabled"] is False
+    assert reloaded.config["blackrock_etf_flow_notification_enabled"] is False

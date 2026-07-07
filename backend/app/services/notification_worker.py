@@ -257,6 +257,8 @@ def format_news_notification(row: Any) -> tuple[str, str]:
 
 def format_whale_notification(row: Any) -> str:
     payload = json.loads(row["payload_json"] or "{}")
+    if row["provider"] == "blackrock_free":
+        return _format_blackrock_free_notification(row, payload)
     fill = payload.get("fill") if isinstance(payload.get("fill"), dict) else {}
     label = str(payload.get("target_label") or row["target_label"] or row["target_id"])
     coin = str(fill.get("coin") or "--")
@@ -280,6 +282,53 @@ def format_whale_notification(row: Any) -> str:
     if closed_pnl not in (None, ""):
         lines.append(f"已实现盈亏: {_format_money(closed_pnl)}")
     lines.append(f"时间: {_format_cst(row['occurred_at_utc'])}")
+    return "\n".join(lines)
+
+
+def _format_blackrock_free_notification(row: Any, payload: dict[str, Any]) -> str:
+    label = str(payload.get("target_label") or row["target_label"] or row["target_id"])
+    lines = [
+        "[IBIT免费监控提醒]",
+        f"对象: {label}",
+        f"类型: {row['action_type']}",
+        f"摘要: {row['summary']}",
+        f"来源: {payload.get('source') or '--'}",
+        f"时间: {_format_cst(row['occurred_at_utc'])}",
+    ]
+    if payload.get("flow_usd") not in (None, ""):
+        lines.append(f"ETF资金流: {_format_money(payload.get('flow_usd'), 0)}")
+    signal = payload.get("signal") if isinstance(payload.get("signal"), dict) else {}
+    if signal:
+        lines.append(f"新闻: {signal.get('title') or '--'}")
+        lines.append(f"置信度: {float(signal.get('confidence') or 0) * 100:.0f}%")
+        reasons = signal.get("reasons") if isinstance(signal.get("reasons"), list) else []
+        if reasons:
+            lines.append(f"理由: {'；'.join(str(item) for item in reasons[:5])}")
+        addresses = signal.get("candidate_addresses") if isinstance(signal.get("candidate_addresses"), list) else []
+        if addresses:
+            lines.append(f"疑似地址: {', '.join(str(item) for item in addresses[:5])}")
+        txids = signal.get("txids") if isinstance(signal.get("txids"), list) else []
+        if txids:
+            lines.append(f"TxID: {', '.join(str(item) for item in txids[:3])}")
+        if signal.get("url"):
+            lines.append(f"新闻链接: {signal.get('url')}")
+    transfer = payload.get("transfer") if isinstance(payload.get("transfer"), dict) else {}
+    if transfer:
+        lines.append(f"BTC转出: {_format_amount(transfer.get('amount_btc'))} BTC")
+        if transfer.get("txid"):
+            lines.append(f"TxID: {transfer.get('txid')}")
+        if transfer.get("source_url"):
+            lines.append(f"链接: {transfer.get('source_url')}")
+    operation = payload.get("operation") if isinstance(payload.get("operation"), dict) else {}
+    if operation:
+        lines.append(f"BTC操作: {operation.get('behavior') or operation.get('direction') or '--'} {_format_amount(operation.get('amount_btc'))} BTC")
+        lines.append(f"净额: {_format_amount(operation.get('net_btc'))} BTC")
+        if operation.get("address"):
+            lines.append(f"地址: {operation.get('address')}")
+        if operation.get("txid"):
+            lines.append(f"TxID: {operation.get('txid')}")
+        if operation.get("source_url"):
+            lines.append(f"链接: {operation.get('source_url')}")
     return "\n".join(lines)
 
 
@@ -321,7 +370,7 @@ class NotificationWorker:
         for row in self.store.list_pending_whale_notifications():
             try:
                 message = format_whale_notification(row)
-                ok, dry_run, result_message = self.notification_service.send_strategy_message("whale", message)
+                ok, dry_run, result_message = self.notification_service.send_whale_message(row, message)
                 self.store.mark_whale_notification(int(row["id"]), ok=ok, error=None if ok else result_message)
                 LOGGER.info("巨鲸通知处理 id=%s ok=%s dry_run=%s", row["id"], ok, dry_run)
             except Exception as exc:  # noqa: BLE001

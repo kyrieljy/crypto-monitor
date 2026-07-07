@@ -1,173 +1,287 @@
-# 项目上下文
+# Project Context
+
+更新日期：2026-05-26
 
 ## 项目目标
 
-`market-monitor-dashboard` 是一个把 `crypto-kdj-alert` 和 `trump-monitor` 集成起来的全栈监控看板与后台管理 MVP。
+`crypto-monitor` 是一个加密市场实时监控看板，目标是把行情策略、新闻社媒、机器人通知、巨鲸/聪明钱监控、后台配置和服务器运维整合成一个可长期运行的系统。
 
-核心目标是：
+当前核心目标：
 
-- 首页做成实时监控看板，第一屏直接展示行情、策略提醒、新闻提醒、巨鲸/聪明钱动态。
-- 后台把原来 `.env` 里的业务配置迁移成可管理表单，包括币种、策略参数、周期、开关、数据源、Webhook 机器人、新闻源、翻译配置、模块显示。
-- 机器人推送按策略绑定不同目标，支持飞书，Telegram 保留为可选类型。
-- 新闻和社媒内容后续通过大模型翻译，翻译只处理新闻/社媒，不绑定通知机器人。
-- 巨鲸和聪明钱当前只做了 UI 壳与数据结构骨架，真实 API 接入留给下一阶段。
+- 前台第一屏直接展示可操作的监控体验，不做营销页。
+- 后台统一管理币种、策略参数、通知机器人、新闻/翻译、清理策略、巨鲸数据源。
+- 服务启动后，只要 `RUN_WORKERS=true`，后台 worker 自动轮询并推送机器人消息，不依赖浏览器打开前端网页。
+- 服务器容量有限，所以需要自动清理数据库，不做本地备份。
+- 巨鲸/聪明钱第一版只做只读监控，不做跟单、下单、授权钱包或交易 API。
 
-## 当前项目位置
+## 当前仓库和部署
 
-- 开发工作区：`C:\Users\54901\Documents\Playground\market-monitor-dashboard`
-- 当前运行项目：`D:\market-monitor-dashboard`
-- 当前本地地址：`http://127.0.0.1:8800/`
-- 默认管理员密码：`change-me-admin`，除非 `.env` 或环境变量 `ADMIN_PASSWORD` 覆盖。
-- 后端启动入口：`backend.app.main:app` 或 `python -m backend.app`
+- 本地项目：`D:\market-monitor-dashboard`
+- GitHub：`https://github.com/kyrieljy/crypto-monitor.git`
+- 主分支：`main`
+- 服务器项目：`/root/crypto-monitor`
+- 服务器访问：`http://167.179.69.248:8800/`
+- systemd 服务：`crypto-monitor.service`
+- 服务命令：`/root/crypto-monitor/.venv/bin/python -m uvicorn backend.app.main:app --host 0.0.0.0 --port 8800`
 - 前端构建目录：`frontend/dist`
+- 后端入口：`backend.app.main:app`
 
-## 当前状态快照
+最近关键提交：
 
-已经完成：
+- `13864d6 Add whale monitoring and chart improvements`
+- `3a56915 Fix chart refresh interactions and frontend cache`
+- `08ee8b6 Fix local chart render crash`
+- `ac3acba Translate repost card content`
 
-- React + Vite 前端、FastAPI 后端、SQLite 配置/事件库。
-- 首页中文深色交易终端风格，支持浅色主题切换。
-- 侧边栏品牌改为 `Crypto Monitor`，支持收起/展开，并带动画。
-- 后台点击后先进入登录页，登录后才显示配置内容，支持登出。
-- 管理员提示改为页面居中的弹框，错误信息尽量转成中文原因。
-- 行情与策略模块固定在第一行，不再拖拽，不出现内部滚动条。
-- 默认布局调整为：
-  - 第一行：行情与策略监控
-  - 第二行：巨鲸与聪明钱动态
-  - 第三行：特朗普社媒监控、白宫发言新闻
-  - 第四行：最近告警、数据源健康
-- 首页五个默认币种：`BTCUSDT`、`ETHUSDT`、`SOLUSDT`、`BNBUSDT`、`ZECUSDT`。
-- K 线默认可按 `4h`、`1h`、`15m`、`5m` 切换，分段按钮有滑动动画。
-- KDJ、MA、BOLL 三个策略在每个币下面分组显示，不混到最近告警里。
-- 策略展示周期统一放在行情模块右侧，KDJ、MA、BOLL 各自独立选择展示周期。
-- 每个策略卡默认显示最新 3 条提醒；超过 3 条才显示“更多”，展开后显示 10 条，且只影响当前卡片高度，不影响 K 线图或其他列。
-- 前台策略提醒保持短格式，例如：`5m J下穿K，收盘价667.54`。
-- 机器人策略推送已经改为详细模板，和前台短格式分离。
-- Webhook 机器人支持新增、删除、编辑、测试，敏感字段后端加密保存并返回 masked 值。
-- 后台开关改成只有点击开关本身才触发，点击同行其他位置不会误触发。
-- 新闻模块添加一键翻译按钮；如果当前显示新闻都已经是中文，则按钮置灰。
-- RSS 标题和正文重复时，前台只显示一个。
-- 数据源健康里的异常信息转为中文解释，并保留原始错误在 tooltip。
-- 巨鲸地址点击进入二级详情页，返回时恢复进入前的滚动位置。
+## 技术栈
 
-尚未完成：
+后端：
 
-- 巨鲸/聪明钱真实 provider API 接入。
-- 巨鲸轮询 worker、真实地址动作事件、当前操作金额、持仓、仓位价值、现货/合约/委托等真实数据绑定。
-- 巨鲸/聪明钱后台管理完整 CRUD。
-- 巨鲸/聪明钱通知模板与策略级机器人绑定的真实发送。
-- 完整端到端测试与生产部署方案。
+- Python
+- FastAPI
+- Uvicorn
+- SQLite
+- Pydantic
+- pytest
+- 后台 asyncio worker
 
-## 本窗口完成的重要内容
+前端：
 
-本窗口主要完成了 UI 与后台体验的多轮修正：
+- React 18
+- TypeScript
+- Vite
+- TanStack Query
+- lightweight-charts
+- lucide-react
+- react-grid-layout
 
-- 品牌、标题、模块名称统一：
-  - `Market Monitor` 改为 `Crypto Monitor`。
-  - `五币行情与策略提醒` 改为 `行情与策略监控`。
-  - `特朗普言论提醒` 改为 `特朗普社媒监控`。
-  - 去掉顶部多余小字。
-- 看板布局统一宽度，下面模块和第一行行情模块对齐。
-- 侧边栏收起后，主内容不再无限扩宽，而是保持原宽度居中，两边留白。
-- “更多/收起”和周期按钮增加动画过渡。
-- 展开卡片高度改为按内容自适应，不再固定很长。
-- 修复后台 webhook 输入框每输入 1 个字符失焦的问题。
-- 修复点击 webhook 测试时先弹“保存成功”的问题。
-- 修复后台开关同行误触发问题。
-- 后端新增机器人推送详细模板测试，已通过：
-  - `D:\market-monitor-dashboard\.venv\Scripts\python.exe -m pytest D:\market-monitor-dashboard\backend\app\tests\test_notification_templates.py -q`
-  - 结果：`3 passed`
+运行环境：
 
-## 关键历史指令
+- 本地 Windows 开发
+- Ubuntu 服务器 + systemd
+- Node 需要 20+，Node 12 会导致 TypeScript/Vite 构建失败
 
-用户明确要求：
+## 已完成能力
 
-- 做成中文界面。
-- 新闻用大模型翻译。
-- 顶部五个币，每个币下方分别显示对应的 KDJ、MA、BOLL 提醒，按策略分类，不要混在 recent 里。
-- 第二行放特朗普、白宫等新闻提醒。
-- 第三行放巨鲸和聪明钱关注地址的操作动态、当前操作金额、持仓。
-- 巨鲸每个地址点进去要有二级页面，可复用币安持仓页面风格。
-- 币的独立行情默认展示 `15m` K 线波动。
-- 前台看板展示周期和后台机器人提醒周期是两个概念：
-  - 前台：所有周期都监控，用户选择看哪个周期。
-  - 后台：配置机器人提醒哪些周期。
-- 行情与策略页面不要拖动，默认能看完所有策略。
-- 每个策略从上到下按最新时间显示前三个预警。
-- 如果行情源走灾备，要显示当前生效的数据源。
-- KDJ/MA/BOLL 后台都应支持实时 K 线开关。
-- 后台必须先登录才能看内容。
-- 提示弹框要页面居中，关闭按钮放右上角。
-- 数据源健康异常要中文解析。
-- 机器人推送和前台看板显示的策略内容要不一样。
-- 现在重新开窗口要做巨鲸和聪明钱功能，目前只是 UI 壳。
+### 行情与策略
 
-## 旧项目迁移范围
+- 默认关注：`BTCUSDT`、`ETHUSDT`、`SOLUSDT`、`BNBUSDT`、`ZECUSDT`。
+- 行情源支持 Binance Futures 主源和 OKX 灾备。
+- 前台最近告警和行情工具条显示来源，例如“币安 Futures 优先，OKX 备用”“主源 币安”“灾备 OKX”。
+- KDJ、MA、BOLL 都已接入 worker、前台展示、后台配置和机器人模板。
+- 机器人提醒已移除“K线时间”字段。
+- BOLL 机器人提醒顺序为上轨、中轨、下轨。
+- 策略卡片点击后弹窗显示明细，包含 KDJ 值、MA 值、BOLL 上中下轨、当前价/收盘价、数据源、提醒时间等。
 
-保留：
+### K 线图和布局
 
-- KDJ：J 上穿/下穿 K。
-- MA：快慢均线穿越。
-- Trump/White House 新闻源。
-- Truthbrush 可选、TrumpTruth RSS、White House Gallery。
-- 分类、翻译、去重、失败重试、数据清理。
+- 前台标题为 `Crypto Monitor`。
+- ETH K 线大图置顶放大，右侧显示 ETH 的 KDJ/MA/BOLL 预警。
+- 其余四个币种在下方按原样并排展示。
+- ETH 大图支持 MA/BOLL/KDJ 指标线切换。
+- 默认只显示 MA 组，包含 MA7、MA25、MA99。
+- BOLL 和 KDJ 需要用户主动切换，不和 MA 同时显示。
+- 指标线有颜色标注和鼠标提示说明；BOLL 颜色已经做区分。
+- K 线图支持鼠标拖拽平移和滚轮缩放。
+- K 线请求根数已提高到 600，后端限制为 20 到 1000。
+- 已修复刷新 K 线后黑屏问题：不要再用 `container.innerHTML = ""` 清空 lightweight-charts 容器。
+- 已给 `index.html` 加 no-cache，避免生产环境刷新后拿到过期资源 hash。
 
-删除：
+### 新闻和特朗普社媒
 
-- 1 分钟高低差告警。
-- 1 分钟成交量告警。
-- GNews。
+- Trump RSS 默认优先，Truthbrush 保留为可选，避免双源默认重复。
+- RSS 描述不再把 HTML 原样作为摘要推送。
+- 对无标题、空正文、纯链接、转发、媒体帖，后端会抓取详情页补全媒体和卡片信息。
+- `news_events.metadata_json` 使用稳定字段：
+  - `content_kind`
+  - `original_url`
+  - `original_id`
+  - `links`
+  - `media`
+  - `card`
+- 图片直接在前台小尺寸完整显示，使用缩小预览，不截取。
+- 视频如果只有缩略图，显示预览图和“视频”标记。
+- 转发/链接卡片使用紧凑预览。
+- 没有文字的媒体帖显示“图片/视频/转发内容，点击查看原帖”。
+- Truth Social 跳转应优先使用 `https://truthsocial.com/@realDonaldTrump/posts/{id}`。
+- 前端会过滤翻译失败的提示词/解释 token，不把“请提供英文新闻标题或摘要”等错误文本展示为正文。
+- 已补充转发卡片描述翻译：`metadata.card.translated_description`。
 
-新增：
+### 通知机器人
 
-- BOLL 上下轨突破策略。
-- 巨鲸/聪明钱模块骨架。
+- 支持飞书和 Telegram 类型。
+- 敏感字段加密存储，API 返回 masked 值。
+- 通知目标和策略绑定在后台配置。
+- 翻译策略、清理策略不绑定机器人。
+- 未经用户明确确认，不触发真实 webhook 测试。
+- 机器人消息保持文本模式，不直接发送图片二进制。
 
-## 运行与同步注意事项
+### 清理策略
 
-当前可写根目录是 `C:\Users\54901\Documents\Playground`。如果需要让运行中的项目生效，需要把修改同步到 `D:\market-monitor-dashboard`。D 盘不在默认可写根目录内，写入需要提权。
+- 新增 `CleanupWorker`。
+- 只在 `RUN_WORKERS=true` 时运行。
+- 默认每天北京时间 `12:30` 检查并清理。
+- 通过 `app_state.cleanup_last_run_date` 防止同一天重复执行。
+- 默认保留：
+  - 告警 30 天
+  - 新闻 60 天
+  - 巨鲸事件 90 天
+- 默认删除未推送成功的过期数据。
+- 删除后默认执行 SQLite `VACUUM` 释放磁盘空间。
+- 不清理 `strategy_configs`、`notifier_targets`、`dashboard_*`、`app_state`、`source_health`。
+- 不做本地数据库备份，容量优先。
 
-常用命令：
+### 巨鲸与聪明钱
 
-```powershell
-cd C:\Users\54901\Documents\Playground\market-monitor-dashboard\frontend
-npm.cmd run build
+第一版定位：只读监控，不做跟单。
+
+已完成：
+
+- `whale_targets`：关注对象、地址、标签、来源链接、启用状态。
+- `whale_snapshots`：最新快照，保存持仓、资产、协议仓位、当前委托、成交、资金流水、历史订单、费用等。
+- `whale_events`：动态事件，支持去重和机器人推送状态。
+- `WhaleRunner`：在 `RUN_WORKERS=true` 时轮询关注对象。
+- 巨鲸关注对象管理已经从后台策略配置挪到巨鲸模块。
+- 标签改为下拉勾选，默认“聪明钱”，不是自由手填。
+- 来源链接不是必填，只用于展示和溯源，不影响监控。
+- 当前重点地址：麻吉大哥 `0x020ca66c30bec2c4fe3861a94e4db4a498a35872`。
+
+Hyperliquid 已接入：
+
+- `clearinghouseState`
+- `allMids`
+- `metaAndAssetCtxs`
+- `frontendOpenOrders`
+- `historicalOrders`
+- `userFills`
+- `userFillsByTime`
+- `userFunding`
+- `userNonFundingLedgerUpdates`
+- `portfolio`
+- `userFees`
+
+巨鲸机器人推送规则：
+
+- 关注地址对象有新成交操作就提醒。
+- 后台阈值只用于前台“大额”标记，不再作为推送门槛。
+- 首次同步只建立游标和前台展示，不补发历史机器人通知，避免刷屏。
+
+巨鲸机器人模板当前要求：
+
+```text
+[Hyperliquid成交提醒]
+对象: 麻吉大哥
+币种: ETH
+仓位动作: 买入开多
+数量: 100 ETH
+开仓价格: $2,100.00
+杠杆: 25x 全仓
+成交额: $210,000
+手续费: ...
+已实现盈亏: ...
+时间: 2026-05-26 15:30:00 CST
 ```
 
-```powershell
-cd D:\market-monitor-dashboard
-.\.venv\Scripts\python.exe -m backend.app
+模板禁止包含：
+
+- 地址
+- 链接
+- 大额标记：是/否
+
+仓位动作中文映射：
+
+- `Open Long` -> 买入开多
+- `Close Long` -> 卖出平多
+- `Open Short` -> 卖出开空
+- `Close Short` -> 买入平空
+
+## 关键解释
+
+### RUN_WORKERS=true 是什么
+
+`RUN_WORKERS=true` 表示 FastAPI 启动时同时启动后台轮询任务：
+
+- 技术策略 worker
+- 新闻 worker
+- 通知 worker
+- 清理 worker
+- 巨鲸 worker
+
+生产环境应该默认开启。关闭后前端 API 仍可访问，但不会自动轮询策略、新闻、清理和推送。
+
+### K 线时间和提醒时间为什么会差很多
+
+K 线时间是蜡烛的开盘时间或周期时间，不是发送提醒的时间。提醒时间取决于 worker 什么时候轮询到该根 K 线、数据源是否延迟、是否刚启动补拉、是否走灾备源、以及通知 worker 排队时间。所以有时非常接近，有时会差几十分钟。
+
+### Hyperliquid SSL EOF 是不是限频
+
+`SSLEOFError EOF occurred in violation of protocol` 更像网络/TLS 或对端连接中断，不一定是请求次数限制。但为了安全，已经按保守频率处理：
+
+- 主轮询不低于 300 秒
+- 成交轮询不低于 120 秒
+- 扩展信息轮询不低于 1800 秒
+
+## 服务器运维速记
+
+常规更新：
+
+```bash
+cd /root/crypto-monitor
+git pull
+. .venv/bin/activate
+pip install -r backend/requirements.txt
+cd frontend
+npm run build
+cd ..
+sudo systemctl restart crypto-monitor
+sudo systemctl status crypto-monitor --no-pager
 ```
 
-后端测试建议使用项目 venv，系统 Python 可能缺依赖：
+如果前端依赖有变化，再运行：
 
-```powershell
-D:\market-monitor-dashboard\.venv\Scripts\python.exe -m pytest D:\market-monitor-dashboard\backend\app\tests -q
+```bash
+cd /root/crypto-monitor/frontend
+npm ci --include=dev
+npm run build
 ```
 
-## 禁止或需要避免的事
+不需要每次都删除 `node_modules`。如果服务器容量紧张，构建后可以删除，但下次构建会重新安装依赖。
 
-- 不要用 `git reset --hard`、`git checkout --` 等命令回滚用户改动。
-- 不要为了演示巨鲸功能伪造“真实监控能力”。没有 API 文档前只能做 adapter、配置、UI 和测试数据。
-- 不要在未确认的情况下点击真实 webhook 测试，可能会向外部机器人发送消息。
-- 不要把前台策略短格式改成机器人推送长格式。
-- 不要把前台展示周期和后台机器人提醒周期混为一谈。
-- 不要把 KDJ、MA、BOLL 再拆成独立模块出现在模块显示里；现在它们属于 `行情与策略监控` 内部分类。
-- 不要让行情与策略监控模块再次出现拖拽或内部横向滚动条。
-- 不要把翻译配置设计成 webhook；翻译只属于新闻/社媒文本处理。
-- 不要把 Truthbrush 和 RSS 同时默认打开导致重复；当前默认是 RSS 优先。
+查看日志：
 
-## 给下一个窗口的接力说明
+```bash
+sudo journalctl -u crypto-monitor -f
+```
 
-下一个窗口的主要任务是继续做“巨鲸与聪明钱”真实功能。
+停止服务：
 
-当前巨鲸模块只是 UI 壳：
+```bash
+sudo systemctl stop crypto-monitor
+```
 
-- 首页有巨鲸与聪明钱模块。
-- 已有默认地址 `machi` / `麻吉大哥` / `0x020c...5872`。
-- 点击地址能进入二级详情页。
-- 二级详情页已经按币安持仓页风格做了基本结构。
-- 后端有 `whale_targets`、`whale_events` 表和 `/api/whales`、`/api/whales/{id}` 接口。
-- 还没有真实 provider、API Key 配置生效、轮询 worker、真实事件入库、持仓/操作金额计算。
+开机自启：
 
-下一步应该先确认巨鲸 API 文档，再实现 provider adapter 和数据模型，不要直接写死某个第三方响应结构。
+```bash
+sudo systemctl enable crypto-monitor
+```
+
+## 用户关键约束
+
+- 不做跟单按钮。
+- 不做交易、签名、钱包授权、私钥管理。
+- 不触发真实 webhook，除非用户单独确认。
+- 不做本地数据库备份，服务器容量优先。
+- 不显示原始 HTML。
+- 不把翻译失败提示展示到前台正文。
+- 不在机器人提醒里显示 K 线时间。
+- 不让主题、拖拽布局、周期选择等用户个人 UI 操作互相影响；只有翻译和后台策略这类全局配置共享。
+- KDJ/MA/BOLL 仍属于行情与策略监控内部，不恢复成独立模块。
+- 前台设计保持密集、专业、交易终端风格。
+
+## 当前最重要的后续方向
+
+1. 确认生产环境已拉取最新提交并重新构建，尤其是图表拖拽/滚轮、no-cache、社媒转发翻译。
+2. 继续完善巨鲸页：成交、资金流水、历史订单、最近动态的筛选和分页。
+3. 做 EVM 大额转账监控方案，优先评估 Alchemy Free。
+4. 增加社媒转发卡片历史数据的翻译补齐或后台批处理。
+5. 后续有预算再接 DeBank/Nansen/Arkham，增强多链资产和聪明钱标签。

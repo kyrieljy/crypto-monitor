@@ -238,6 +238,75 @@ def test_media_news_notification_uses_plain_text_and_preview_links() -> None:
     assert "<a " not in message
 
 
+def test_blackrock_free_whale_notification_template() -> None:
+    row = {
+        "id": 1,
+        "provider": "blackrock_free",
+        "target_id": "blackrock-free",
+        "target_label": "IBIT 免费监控",
+        "address_or_subject": "IBIT",
+        "action_type": "blackrock_confirmed_btc_outflow",
+        "summary": "IBIT 免费监控 已确认 BTC 地址簇转出 1300 BTC",
+        "payload_json": json.dumps(
+            {
+                "target_label": "IBIT 免费监控",
+                "source": "Blockstream",
+                "transfer": {
+                    "txid": "btc-tx-1",
+                    "amount_btc": 1300,
+                    "source_url": "https://blockstream.info/tx/btc-tx-1",
+                },
+            },
+            ensure_ascii=False,
+        ),
+        "occurred_at_utc": "2026-05-25T22:00:00+00:00",
+    }
+
+    message = format_whale_notification(row)
+
+    assert message.startswith("[IBIT")
+    assert "IBIT 免费监控" in message
+    assert "Blockstream" in message
+    assert "1300 BTC" in message
+    assert "btc-tx-1" in message
+
+
+def test_ibit_news_candidate_notification_template() -> None:
+    row = {
+        "id": 1,
+        "provider": "blackrock_free",
+        "target_id": "ibit-free",
+        "target_label": "IBIT 免费监控",
+        "address_or_subject": "IBIT",
+        "action_type": "ibit_news_address_candidate",
+        "summary": "IBIT 免费监控 新闻线索：疑似地址 1 个",
+        "payload_json": json.dumps(
+            {
+                "target_label": "IBIT 免费监控",
+                "source": "IBIT News",
+                "signal": {
+                    "title": "IBIT 地址向 Coinbase 存入 BTC",
+                    "confidence": 0.85,
+                    "reasons": ["包含 txid", "提到 Coinbase"],
+                    "candidate_addresses": ["bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080"],
+                    "txids": ["a" * 64],
+                    "url": "https://example.com/news/1",
+                },
+            },
+            ensure_ascii=False,
+        ),
+        "occurred_at_utc": "2026-07-06T06:00:00+00:00",
+    }
+
+    message = format_whale_notification(row)
+
+    assert message.startswith("[IBIT")
+    assert "置信度: 85%" in message
+    assert "包含 txid" in message
+    assert "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080" in message
+    assert "https://example.com/news/1" in message
+
+
 def legacy_whale_trade_notification_template() -> None:
     row = {
         "id": 1,

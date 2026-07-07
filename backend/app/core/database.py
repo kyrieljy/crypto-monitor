@@ -90,6 +90,7 @@ class Database:
                     type TEXT NOT NULL,
                     enabled INTEGER NOT NULL DEFAULT 1,
                     secret_json TEXT NOT NULL,
+                    config_json TEXT NOT NULL DEFAULT '{}',
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
@@ -205,12 +206,56 @@ class Database:
                     snapshot_json TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS btc_large_transfers (
+                    txid TEXT PRIMARY KEY,
+                    chain TEXT NOT NULL DEFAULT 'btc',
+                    asset TEXT NOT NULL DEFAULT 'BTC',
+                    block_height INTEGER NOT NULL,
+                    block_hash TEXT NOT NULL,
+                    block_time_utc TEXT NOT NULL,
+                    amount REAL NOT NULL DEFAULT 0,
+                    amount_btc REAL NOT NULL,
+                    total_input_amount REAL NOT NULL DEFAULT 0,
+                    total_output_amount REAL NOT NULL DEFAULT 0,
+                    fee_amount REAL NOT NULL DEFAULT 0,
+                    total_input_btc REAL NOT NULL,
+                    total_output_btc REAL NOT NULL,
+                    fee_btc REAL NOT NULL,
+                    input_addresses_json TEXT NOT NULL,
+                    output_addresses_json TEXT NOT NULL,
+                    address_operations_json TEXT NOT NULL,
+                    exchange_hints_json TEXT NOT NULL,
+                    source_url TEXT NOT NULL,
+                    raw_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS btc_news_matches (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    target_id TEXT NOT NULL,
+                    signal_id TEXT NOT NULL,
+                    txid TEXT NOT NULL,
+                    candidate_address TEXT NOT NULL,
+                    address_role TEXT NOT NULL,
+                    confidence REAL NOT NULL,
+                    reasons_json TEXT NOT NULL,
+                    signal_json TEXT NOT NULL,
+                    transfer_json TEXT NOT NULL,
+                    published_at_utc TEXT NOT NULL,
+                    matched_at_utc TEXT NOT NULL,
+                    UNIQUE(target_id, signal_id, txid, candidate_address, address_role)
+                );
                 """
             )
             self._migrate_schema_columns()
             self.conn.commit()
 
     def _migrate_schema_columns(self) -> None:
+        notifier_columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(notifier_targets)").fetchall()}
+        if "config_json" not in notifier_columns:
+            self.conn.execute("ALTER TABLE notifier_targets ADD COLUMN config_json TEXT NOT NULL DEFAULT '{}'")
+
         columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(whale_events)").fetchall()}
         additions = {
             "event_key": "ALTER TABLE whale_events ADD COLUMN event_key TEXT",
@@ -222,11 +267,64 @@ class Database:
         for column, sql in additions.items():
             if column not in columns:
                 self.conn.execute(sql)
+        btc_columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(btc_large_transfers)").fetchall()}
+        btc_additions = {
+            "chain": "ALTER TABLE btc_large_transfers ADD COLUMN chain TEXT NOT NULL DEFAULT 'btc'",
+            "asset": "ALTER TABLE btc_large_transfers ADD COLUMN asset TEXT NOT NULL DEFAULT 'BTC'",
+            "amount": "ALTER TABLE btc_large_transfers ADD COLUMN amount REAL NOT NULL DEFAULT 0",
+            "total_input_amount": "ALTER TABLE btc_large_transfers ADD COLUMN total_input_amount REAL NOT NULL DEFAULT 0",
+            "total_output_amount": "ALTER TABLE btc_large_transfers ADD COLUMN total_output_amount REAL NOT NULL DEFAULT 0",
+            "fee_amount": "ALTER TABLE btc_large_transfers ADD COLUMN fee_amount REAL NOT NULL DEFAULT 0",
+        }
+        for column, sql in btc_additions.items():
+            if column not in btc_columns:
+                self.conn.execute(sql)
+        self.conn.execute(
+            """
+            UPDATE btc_large_transfers
+            SET amount = amount_btc,
+                total_input_amount = total_input_btc,
+                total_output_amount = total_output_btc,
+                fee_amount = fee_btc
+            WHERE (amount IS NULL OR amount = 0)
+              AND amount_btc > 0
+            """
+        )
         self.conn.execute(
             """
             CREATE UNIQUE INDEX IF NOT EXISTS idx_whale_events_event_key
             ON whale_events(event_key)
             WHERE event_key IS NOT NULL
+            """
+        )
+        self.conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_btc_large_transfers_block_time
+            ON btc_large_transfers(block_time_utc DESC)
+            """
+        )
+        self.conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_btc_large_transfers_amount
+            ON btc_large_transfers(amount_btc DESC)
+            """
+        )
+        self.conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_btc_large_transfers_chain_time
+            ON btc_large_transfers(chain, block_time_utc DESC)
+            """
+        )
+        self.conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_btc_large_transfers_asset_amount
+            ON btc_large_transfers(asset, amount DESC)
+            """
+        )
+        self.conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_btc_news_matches_txid
+            ON btc_news_matches(txid)
             """
         )
 
@@ -351,6 +449,7 @@ class Database:
                     "alert_retention_days": 30,
                     "news_retention_days": 60,
                     "whale_retention_days": 90,
+                    "btc_candidate_retention_days": 90,
                     "delete_pending_notifications": True,
                     "vacuum_after_cleanup": True,
                 },
@@ -367,7 +466,43 @@ class Database:
                     "hyperliquid_base_url": "https://api.hyperliquid.xyz",
                     "debank_enabled": False,
                     "debank_base_url": "https://pro-openapi.debank.com",
+                    "blackrock_free_enabled": True,
+                    "blackrock_free_notification_enabled": True,
+                    "blackrock_etf_flow_notification_enabled": True,
+                    "blackrock_btc_outflow_notification_enabled": True,
+                    "blackrock_btc_address_operation_notification_enabled": True,
+                    "ibit_news_candidate_notification_enabled": True,
+                    "blackrock_ishares_url": "https://www.ishares.com/us/products/333011/ishares-bitcoin-trust-etf",
+                    "blackrock_farside_url": "https://farside.co.uk/btc/",
+                    "blackrock_blockstream_api": "https://blockstream.info/api",
+                    "blackrock_flow_alert_min_usd": 50000000,
+                    "blackrock_btc_transfer_min_btc": 1000,
+                    "blackrock_btc_lookback_hours": 24,
+                    "blackrock_initial_notification_enabled": False,
+                    "ibit_news_enabled": False,
+                    "ibit_news_rss_urls": [],
+                    "ibit_news_keywords": ["IBIT", "BlackRock", "贝莱德", "Coinbase", "OnchainLens", "Lookonchain", "Ai 姨", "txid", "地址", "ETH", "Ethereum", "以太坊"],
+                    "ibit_news_lookback_hours": 72,
+                    "ibit_news_max_items": 60,
+                    "ibit_news_candidate_notify_min_confidence": 0.6,
+                    "ibit_news_initial_notification_enabled": False,
+                    "btc_candidate_monitor_enabled": True,
+                    "btc_candidate_min_btc": 500,
+                    "btc_candidate_retention_days": 90,
+                    "btc_candidate_backfill_blocks": 3,
+                    "btc_candidate_scan_blocks_per_run": 1,
+                    "btc_candidate_match_window_hours": 48,
+                    "btc_candidate_amount_tolerance_pct": 8,
+                    "btc_candidate_max_matches_per_news": 20,
                     "etherscan_enabled": False,
+                    "etherscan_api_url": "https://api.etherscan.io/v2/api",
+                    "etherscan_chain_id": "1",
+                    "etherscan_min_request_interval_seconds": 0.25,
+                    "eth_candidate_monitor_enabled": True,
+                    "eth_candidate_min_eth": 5000,
+                    "eth_candidate_backfill_blocks": 3,
+                    "eth_candidate_scan_blocks_per_run": 1,
+                    "eth_candidate_history_blocks_per_news": 1440,
                     "poll_seconds": 300,
                     "trade_monitor_enabled": True,
                     "trade_notification_enabled": True,
@@ -440,7 +575,7 @@ class Database:
                 "INSERT INTO app_state (state_key, state_value) VALUES ('ui_layout_version', '2')",
             )
         layout_version = self.query_one("SELECT state_value FROM app_state WHERE state_key = 'ui_layout_version'")
-        if layout_version is None or str(layout_version["state_value"]) != "3":
+        if layout_version is None or str(layout_version["state_value"]) not in {"3", "4"}:
             for module_id in {"charts", "whale", "trump_social", "whitehouse", "alerts", "health"}:
                 self.execute("UPDATE dashboard_modules SET visible = 1 WHERE id = ?", (module_id,))
             self.execute(
@@ -454,7 +589,7 @@ class Database:
                 ON CONFLICT(state_key) DO UPDATE SET state_value = excluded.state_value
                 """,
             )
-        self._remove_obsolete_dashboard_modules({"kdj", "ma", "boll"})
+        self._remove_obsolete_dashboard_modules({"kdj", "ma", "boll", "btc_addresses"})
 
         default_secret = encrypt_json({"webhook_url": "", "bot_token": "", "chat_id": ""}, self.secret_key)
         self.execute(
@@ -472,6 +607,39 @@ class Database:
                 """,
                 (strategy_id,),
             )
+        self.execute(
+            """
+            INSERT OR IGNORE INTO whale_targets (id, label, address_or_subject, enabled, config_json, updated_at)
+            VALUES ('blackrock-ibit-free', 'IBIT 免费监控', 'IBIT', 0, ?, ?)
+            """,
+            (
+                json.dumps(
+                    {
+                        "provider": "blackrock_free_monitor",
+                        "tags": ["机构", "巨鲸", "重点关注"],
+                        "btc_addresses": [],
+                        "suspected_btc_addresses": [],
+                        "source_url": "https://www.ishares.com/us/products/333011/ishares-bitcoin-trust-etf",
+                        "farside_url": "https://farside.co.uk/btc/",
+                        "notes": "免费方案：官方 IBIT 日频、Farside ETF Flow、手工确认 BTC 地址簇、疑似 BTC 地址池；不能自动枚举 Arkham 实体全部地址。",
+                        "current_operation_amount": None,
+                    },
+                    ensure_ascii=False,
+                ),
+                now,
+            ),
+        )
+        self.execute(
+            """
+            UPDATE whale_targets
+            SET label = 'IBIT 免费监控',
+                address_or_subject = 'IBIT',
+                updated_at = ?
+            WHERE id = 'blackrock-ibit-free'
+              AND label IN ('BlackRock / IBIT 免费监控', 'BlackRock 免费监控')
+            """,
+            (now,),
+        )
         self.execute(
             """
             INSERT OR IGNORE INTO whale_targets (id, label, address_or_subject, enabled, config_json, updated_at)
@@ -530,13 +698,50 @@ class Database:
         whale_row = self.query_one("SELECT config_json FROM strategy_configs WHERE id = 'whale'")
         if whale_row is not None:
             config = json.loads(whale_row["config_json"])
+            legacy_ibit_notification_enabled = bool(config.get("blackrock_free_notification_enabled", True))
             defaults = {
                 "provider": "hyperliquid_debank",
                 "hyperliquid_enabled": True,
                 "hyperliquid_base_url": "https://api.hyperliquid.xyz",
                 "debank_enabled": False,
                 "debank_base_url": "https://pro-openapi.debank.com",
+                "blackrock_free_enabled": True,
+                "blackrock_free_notification_enabled": True,
+                "blackrock_etf_flow_notification_enabled": legacy_ibit_notification_enabled,
+                "blackrock_btc_outflow_notification_enabled": legacy_ibit_notification_enabled,
+                "blackrock_btc_address_operation_notification_enabled": legacy_ibit_notification_enabled,
+                "ibit_news_candidate_notification_enabled": legacy_ibit_notification_enabled,
+                "blackrock_ishares_url": "https://www.ishares.com/us/products/333011/ishares-bitcoin-trust-etf",
+                "blackrock_farside_url": "https://farside.co.uk/btc/",
+                "blackrock_blockstream_api": "https://blockstream.info/api",
+                "blackrock_flow_alert_min_usd": 50000000,
+                "blackrock_btc_transfer_min_btc": 1000,
+                "blackrock_btc_lookback_hours": 24,
+                "blackrock_initial_notification_enabled": False,
+                "ibit_news_enabled": False,
+                "ibit_news_rss_urls": [],
+                "ibit_news_keywords": ["IBIT", "BlackRock", "贝莱德", "Coinbase", "OnchainLens", "Lookonchain", "Ai 姨", "txid", "地址", "ETH", "Ethereum", "以太坊"],
+                "ibit_news_lookback_hours": 72,
+                "ibit_news_max_items": 60,
+                "ibit_news_candidate_notify_min_confidence": 0.6,
+                "ibit_news_initial_notification_enabled": False,
+                "btc_candidate_monitor_enabled": True,
+                "btc_candidate_min_btc": 500,
+                "btc_candidate_retention_days": 90,
+                "btc_candidate_backfill_blocks": 3,
+                "btc_candidate_scan_blocks_per_run": 1,
+                "btc_candidate_match_window_hours": 48,
+                "btc_candidate_amount_tolerance_pct": 8,
+                "btc_candidate_max_matches_per_news": 20,
                 "etherscan_enabled": False,
+                "etherscan_api_url": "https://api.etherscan.io/v2/api",
+                "etherscan_chain_id": "1",
+                "etherscan_min_request_interval_seconds": 0.25,
+                "eth_candidate_monitor_enabled": True,
+                "eth_candidate_min_eth": 5000,
+                "eth_candidate_backfill_blocks": 3,
+                "eth_candidate_scan_blocks_per_run": 1,
+                "eth_candidate_history_blocks_per_news": 1440,
                 "poll_seconds": 300,
                 "trade_monitor_enabled": True,
                 "trade_notification_enabled": True,
@@ -555,6 +760,13 @@ class Database:
                 if key not in config:
                     config[key] = value
                     changed = True
+            keywords = config.get("ibit_news_keywords")
+            if isinstance(keywords, list):
+                existing_keywords = {str(item).casefold() for item in keywords}
+                for keyword in ("ETH", "Ethereum", "以太坊"):
+                    if keyword.casefold() not in existing_keywords:
+                        keywords.append(keyword)
+                        changed = True
             for key, minimum in {"poll_seconds": 300, "trade_poll_seconds": 120, "extended_poll_seconds": 1800}.items():
                 try:
                     current = int(config.get(key, 0))
@@ -581,6 +793,29 @@ class Database:
                 "UPDATE whale_targets SET address_or_subject = ?, config_json = ?, updated_at = ? WHERE id = 'machi'",
                 (machi_address, json.dumps(config, ensure_ascii=False), now),
             )
+
+        ibit_row = self.query_one("SELECT config_json FROM whale_targets WHERE id = 'blackrock-ibit-free'")
+        if ibit_row is not None:
+            config = json.loads(ibit_row["config_json"])
+            changed = False
+            defaults = {
+                "provider": "blackrock_free_monitor",
+                "btc_addresses": [],
+                "suspected_btc_addresses": [],
+                "notes": "免费方案：官方 IBIT 日频、Farside ETF Flow、手工确认 BTC 地址簇、疑似 BTC 地址池；不能自动枚举 Arkham 实体全部地址。",
+            }
+            for key, value in defaults.items():
+                if key not in config:
+                    config[key] = value
+                    changed = True
+            if str(config.get("notes") or "").startswith("免费方案：官方 IBIT 日频、Farside ETF Flow、手工确认 BTC 地址簇；"):
+                config["notes"] = defaults["notes"]
+                changed = True
+            if changed:
+                self.execute(
+                    "UPDATE whale_targets SET config_json = ?, updated_at = ? WHERE id = 'blackrock-ibit-free'",
+                    (json.dumps(config, ensure_ascii=False), now),
+                )
 
     def _migrate_dashboard_module_defaults(self) -> None:
         charts_row = self.query_one("SELECT config_json FROM dashboard_modules WHERE id = 'charts'")

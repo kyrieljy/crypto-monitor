@@ -1,168 +1,194 @@
-# 待办事项
+# TODO
 
-## 下一阶段重点：巨鲸与聪明钱
+更新日期：2026-05-26
 
-用户下一步要重新开窗口做巨鲸和聪明钱功能。当前只是 UI 壳，不能当成真实监控已完成。
+## P0：下一步优先处理
 
-优先级 P0：
+### 1. 生产环境同步验证
 
-- 确认巨鲸/聪明钱 API 文档：
-  - 鉴权方式。
-  - Base URL。
-  - 地址/对象查询接口。
-  - 动作事件接口。
-  - 持仓/现货/委托/成交接口。
-  - 分页、限频、时间字段、金额币种。
-- 定义 provider adapter：
-  - `list_targets` 或 `get_target_profile`
-  - `fetch_events(target, since)`
-  - `fetch_positions(target)`
-  - `fetch_holdings(target)`
-  - `fetch_orders(target)`
-  - 错误类型和限频处理。
-- 扩展后台配置：
-  - provider 类型。
-  - API Base URL。
-  - API Key。
-  - 轮询间隔。
-  - 关注地址/对象 CRUD。
-  - 地址标签。
-  - 启停。
-  - 绑定通知机器人。
-- 实现巨鲸 worker：
-  - 定时轮询 provider。
-  - 去重入库。
-  - 更新 `source_health`。
-  - 写入 `whale_events`。
-  - 更新地址配置里的 positions/holdings，或拆出独立 snapshot 表。
-- 把首页巨鲸模块接到真实数据：
-  - 最近动作。
-  - 当前操作金额。
-  - 当前持仓。
-  - 盈亏/仓位价值。
-- 把二级详情页接到真实数据：
-  - 基本信息。
-  - 合约持仓。
-  - 现货持仓。
-  - 当前委托。
-  - 历史动作。
-- 增加巨鲸通知模板：
-  - 大额买入/卖出。
-  - 开仓/平仓。
-  - 加仓/减仓。
-  - 清仓。
-  - 资金转入/转出。
-- 增加测试：
-  - provider mock。
-  - 去重。
-  - 轮询状态。
-  - 持仓渲染。
-  - 通知模板。
+- 在服务器 `/root/crypto-monitor` 拉取最新 `main`。
+- 构建前端并重启 systemd。
+- 验证生产环境：
+  - ETH 大图滚轮缩放和鼠标拖拽。
+  - 刷新 K 线不黑屏。
+  - 浏览器强刷后不会拿旧资源。
+  - Trump 转发卡片描述能显示中文翻译。
+  - 巨鲸成交机器人模板不包含地址、链接、大额标记。
 
-## 技术策略后续
+### 2. 本地 localhost 黑屏排查
 
-- 补齐 KDJ/MA/BOLL 的完整单元测试覆盖：
-  - 上穿/下穿边界。
-  - live candle 开关。
-  - 参数热更新。
-  - 数据源灾备。
-  - 去重。
-- 后台策略表单继续细化：
-  - 输入范围校验。
-  - 保存前中文错误提示。
-  - 数据源选择说明。
-- 明确 MA 多周期配置的 UI 和后端字段是否完全统一，目前历史上有 `interval` 和 `intervals` 两种字段，需要保持兼容。
+如果本地 `localhost:8800` 仍黑屏：
 
-## 新闻和翻译后续
+- 打开浏览器控制台看 JS 报错。
+- 确认后端返回的是最新 `frontend/dist/index.html`。
+- 确认没有旧 service/cache。
+- 查看是否触发 ErrorBoundary。
+- 不要恢复 `CoinChart` 中的 `container.innerHTML = ""`。
 
-- 验证 Truthbrush 关闭、RSS 开启时是否完全避免重复。
-- 白宫新闻需要继续观察实际抓取数据：
-  - Gallery 结构是否变化。
-  - include/exclude keywords 是否过严。
-  - 源站网络失败时中文错误是否准确。
-- 大模型翻译：
-  - 确认 `deepseek-v4-flash` 在当前 API 地址可用。
-  - 增加翻译失败时的中文错误原因。
-  - 避免重复翻译已经中文的新闻。
-  - 增加批量翻译进度状态。
+### 3. 社媒转发翻译补齐
 
-## Webhook 和通知后续
+当前新入库转发卡片已经支持 `metadata.card.translated_description`。
 
-- 在用户确认后，使用真实飞书 webhook 做一次端到端测试。
-- 增加测试发送结果展示：
-  - HTTP 状态码。
-  - 飞书返回 code/message。
-  - 网络错误中文原因。
-- 增加 Telegram 类型的真实测试。
-- 机器人绑定 UI 可以进一步明确：
-  - 每个策略默认机器人。
-  - 禁用策略时是否仍允许测试机器人。
-  - 通知失败重试次数和间隔。
+待处理：
 
-## 前端后续
+- 给历史已入库但未翻译 card 的记录增加批量补齐入口，或在用户点“翻译”时补 metadata。
+- 对纯图片/视频转发，继续只提示类型和跳转，不强行摘要。
+- 转发卡片正文如果是英文，前台应优先显示中文翻译。
 
-- 拆分 `App.tsx`：
-  - `DashboardPage`
-  - `AdminPage`
-  - `MarketStrategyPanel`
-  - `NewsPanel`
-  - `WhalePanel`
-  - `WhaleDetailPage`
-  - `NotifierEditor`
-- 增加前端测试：
-  - 登录保护。
-  - 模块显示开关。
-  - 策略周期切换。
-  - “更多/收起”高度自适应。
-  - 新闻翻译按钮置灰。
-  - webhook 编辑输入不失焦。
-- 移动端继续检查：
-  - 五币行情卡片。
-  - 策略卡片文字不截断。
-  - 后台表单布局。
+### 4. 巨鲸页面继续完善
 
-## 运维和部署后续
+- 最近成交支持分页或“加载更多”，不要一次性渲染过多。
+- 资金流水和历史订单增加筛选。
+- 最近动态区区分：
+  - 成交
+  - 开仓/平仓
+  - 仓位变化
+  - 强平风险
+  - 资金费
+  - 出入金/转账
+- 巨鲸首页卡片补标签、资产概览、最近动作摘要。
 
-- 增加 `.env` 说明：
-  - `DATABASE_PATH`
-  - `HOST`
-  - `PORT`
-  - `APP_SECRET_KEY`
-  - `ADMIN_PASSWORD`
-  - `RUN_WORKERS`
-  - `REQUEST_TIMEOUT_SECONDS`
-- 生产部署前必须更换：
-  - `APP_SECRET_KEY`
-  - `ADMIN_PASSWORD`
-  - 所有真实 webhook/token。
-- 增加日志轮转。
-- 增加数据库备份。
-- 增加健康检查页面或接口聚合。
+## P1：短期增强
+
+### EVM 大额转账监控
+
+需求：突然买入/转入 100 ETH、链上大额转账等。
+
+待研究：
+
+- Alchemy Free 是否足够：
+  - 地址交易历史
+  - token transfer
+  - webhook 或轮询
+  - 免费额度
+- Etherscan V2 是否满足补充浏览器链接和交易记录。
+- 是否需要按链配置：Ethereum、Base、Arbitrum、Optimism、BSC 等。
+
+第一版建议：
+
+- 只做关注地址的大额转账。
+- 不做全链 mempool 扫描。
+- 不做智能合约语义复杂归因。
+- 事件进入 `whale_events`，复用巨鲸机器人通知。
+
+### DeBank 接入
+
+- DeBank OpenAPI 需要 AccessKey。
+- 未配置 AccessKey 时，现货/DeFi tab 显示“未配置数据源”，不要报错。
+- 后台巨鲸策略应保留 DeBank AccessKey 配置。
+- 接入后展示：
+  - 总资产
+  - 各链资产
+  - 协议仓位
+  - token 列表
+
+### 巨鲸数据清理和容量观察
+
+当前清理范围包含 `whale_events`，默认 90 天。
+
+还需要观察：
+
+- `whale_snapshots` 是否会无限增长；当前设计应保留最新快照或覆盖快照。
+- 如果后续引入成交明细独立表，需要加入清理策略。
+- 2000 条最近成交是快照展示上限，不等于数据库永久保留上限。
+
+### 用户隔离
+
+已确认原则：
+
+- 主题、布局拖拽、周期选择、图表指标模式属于终端用户个人偏好。
+- 翻译结果、后台策略、关注对象属于全局共享。
+
+待补齐：
+
+- 检查所有 UI 偏好是否仍写到后端 `dashboard_layouts`。
+- 需要的话迁移到 `localStorage`。
+- 多终端同时访问时，A 的主题切换不应影响 B。
+
+## P2：中期规划
+
+### 聪明钱标签和实体归因
+
+低成本版：
+
+- 手动添加地址。
+- 本地候选库。
+- 来源链接可选。
+
+付费增强：
+
+- Nansen Smart Money / Smart HL Perps Trader。
+- Arkham entity-first 地址情报。
+- DeBank 标签补充。
+
+注意：聪明钱“是谁”不是链上原生事实，属于标签和归因，不能伪造。
+
+### Nginx 和 TLS
+
+当前直接访问 `http://ip:8800`。
+
+后续如果需要 HTTPS：
+
+- 配域名。
+- Nginx 反向代理到 `127.0.0.1:8800`。
+- Certbot 或云服务证书。
+- systemd 仍只管理后端应用。
+
+### 前端拆分
+
+`App.tsx` 已经很大，后续应拆：
+
+- `DashboardPage`
+- `AdminPage`
+- `MarketStrategyPanel`
+- `NewsPanel`
+- `WhalePanel`
+- `WhaleDetailPage`
+- `NotifierEditor`
+- `StrategyEditor`
+
+拆分时不要顺手重构业务逻辑，先按边界迁移。
+
+### 监控和运维
+
+- 增加健康检查端点或页面。
+- 增加日志轮转说明。
+- 增加 systemd 环境文件示例。
+- 增加部署脚本，但不要默认执行 destructive 操作。
+- 增加数据库大小和清理结果展示。
 
 ## 已完成清单
 
-- 建立新项目而不是直接复用旧项目为主项目。
-- 后端 FastAPI + SQLite。
-- 前端 React + Vite。
-- KDJ、MA、BOLL 策略基础实现。
-- Trump RSS、Truthbrush 可选、White House 新闻源。
-- 新闻分类、去重、翻译骨架。
-- 后台登录保护。
-- 策略配置、币种配置、Webhook 机器人配置、模块显示配置。
-- 首页行情与策略监控按币种分列、按策略分组。
-- 看板布局按用户要求调整到 4 行结构。
-- 机器人推送模板和前台看板短文案分离。
-- 巨鲸/聪明钱 UI 壳和二级详情页。
-- 巨鲸返回恢复滚动位置。
-- 后台提示弹框居中。
-- 后台开关误触发修复。
-- 数据源健康中文错误解析。
+- FastAPI + SQLite 后端。
+- React + Vite 前端。
+- 系统部署到 `/root/crypto-monitor` 并由 systemd 托管。
+- Binance/OKX 行情源和灾备提示。
+- KDJ/MA/BOLL 策略。
+- BOLL 策略和机器人模板。
+- 机器人通知绑定和敏感字段加密。
+- 新闻社媒抓取、翻译、去重。
+- Trump 图片/视频/转发帖详情页补全。
+- 前台直接显示社媒图片小预览。
+- 转发卡片跳 Truth detail。
+- 翻译错误 token 前端过滤。
+- 清理策略和 `CleanupWorker`。
+- 巨鲸 Hyperliquid provider。
+- 巨鲸成交级监控。
+- 巨鲸机器人推送。
+- 巨鲸关注对象管理迁移到巨鲸模块。
+- ETH 大图布局。
+- 指标线切换、提示、默认 MA。
+- K 线拖拽、滚轮缩放和刷新黑屏修复。
 
-## 当前不做或暂缓
+## 明确不做
 
-- 不做 GNews。
+- 不做跟单交易。
+- 不做交易签名。
+- 不接私钥。
+- 不做钱包授权。
+- 不在未确认时触发真实 webhook。
+- 不恢复 GNews。
 - 不恢复 1 分钟高低差告警。
 - 不恢复 1 分钟成交量告警。
-- 不在没有 API 文档时伪造巨鲸真实监控。
-- 不把 KDJ、MA、BOLL 作为独立模块重新放回模块显示列表。
-- 不让行情与策略监控模块恢复拖拽。
+- 不把 KDJ/MA/BOLL 做回独立模块。
+- 不在清理前做本地数据库备份。

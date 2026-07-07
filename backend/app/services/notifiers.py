@@ -55,6 +55,19 @@ class NotificationService:
             return True, True, "策略未绑定机器人，跳过发送"
         return self._send_to_notifier(strategy.notifier_id, message, reveal=True)
 
+    def send_whale_message(self, event_row: Any, message: str) -> tuple[bool, bool, str]:
+        strategy = self.store.get_strategy("whale")
+        if strategy is None or not strategy.notifier_id:
+            return True, True, "whale strategy has no notifier"
+        notifier_row = self.store.db.query_one("SELECT * FROM notifier_targets WHERE id = ?", (strategy.notifier_id,))
+        if notifier_row is None:
+            raise KeyError(strategy.notifier_id)
+        config = _json_loads(notifier_row["config_json"], {})
+        payload = _json_loads(str(event_row["payload_json"] or "{}"), {})
+        if not _notifier_allows_whale_target(config, str(event_row["target_id"]), payload):
+            return True, True, "whale target skipped by notifier filter"
+        return self._send_to_notifier(strategy.notifier_id, message, reveal=True)
+
     def _send_to_notifier(self, notifier_id: str, message: str, *, reveal: bool = True) -> tuple[bool, bool, str]:
         row = self.store.db.query_one("SELECT * FROM notifier_targets WHERE id = ?", (notifier_id,))
         if row is None:
@@ -86,3 +99,41 @@ class NotificationService:
                 return False, False, _send_error_message("Telegram", exc)
             return ok, False, "Telegram 发送成功" if ok else "Telegram 返回非成功状态"
         raise NotifierError(f"Unsupported notifier type: {row['type']}")
+
+
+def _json_loads(value: str, fallback: dict[str, Any]) -> dict[str, Any]:
+    try:
+        parsed = json.loads(value or "{}")
+        return parsed if isinstance(parsed, dict) else fallback
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _notifier_allows_whale_target(config: dict[str, Any], target_id: str, payload: dict[str, Any] | None = None) -> bool:
+    raw_ids = config.get("whale_target_ids")
+    selected_targets = {str(item) for item in raw_ids if str(item)} if isinstance(raw_ids, list) else set()
+    if selected_targets and target_id not in selected_targets:
+        return False
+    raw_btc_addresses = config.get("whale_btc_addresses")
+    selected_btc_addresses = {str(item).strip().lower() for item in raw_btc_addresses if str(item).strip()} if isinstance(raw_btc_addresses, list) else set()
+    if not selected_btc_addresses:
+        return True
+    event_addresses = _btc_addresses_from_whale_payload(payload or {})
+    return bool(event_addresses & selected_btc_addresses)
+
+
+def _btc_addresses_from_whale_payload(payload: dict[str, Any]) -> set[str]:
+    found: set[str] = set()
+    for key in ("address", "candidate_address"):
+        value = payload.get(key)
+        if value:
+            found.add(str(value).strip().lower())
+    for nested_key in ("operation", "transfer", "signal"):
+        nested = payload.get(nested_key)
+        if isinstance(nested, dict):
+            found.update(_btc_addresses_from_whale_payload(nested))
+            for list_key in ("candidate_addresses", "addresses"):
+                values = nested.get(list_key)
+                if isinstance(values, list):
+                    found.update(str(item).strip().lower() for item in values if str(item).strip())
+    return found

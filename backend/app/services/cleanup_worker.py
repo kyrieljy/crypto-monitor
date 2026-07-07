@@ -19,6 +19,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "alert_retention_days": 30,
     "news_retention_days": 60,
     "whale_retention_days": 90,
+    "btc_candidate_retention_days": 90,
     "delete_pending_notifications": True,
     "vacuum_after_cleanup": True,
 }
@@ -60,6 +61,14 @@ class CleanupWorker:
             vacuum_after_cleanup=bool(config.get("vacuum_after_cleanup", True)),
             now=current,
         )
+        whale_strategy = self.store.get_strategy("whale")
+        whale_config = whale_strategy.config if whale_strategy is not None else {}
+        btc_deleted = self.store.cleanup_btc_large_transfers(
+            _positive_int(whale_config.get("btc_candidate_retention_days", config.get("btc_candidate_retention_days")), 90),
+            now=current,
+        )
+        result["btc_large_transfer_deleted"] = btc_deleted
+        result["total_deleted"] = int(result.get("total_deleted", 0)) + btc_deleted
         self.store.state_set("cleanup_last_run_date", run_date)
         self.store.state_set("cleanup_last_run_at", local_now.isoformat())
         LOGGER.info("定时清理完成 result=%s", json.dumps(result, ensure_ascii=False, sort_keys=True))

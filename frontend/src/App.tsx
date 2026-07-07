@@ -35,7 +35,10 @@ import { api } from "./lib/api";
 import { cnDate, formatNumber, strategyLabels } from "./lib/format";
 import type {
   AlertEvent,
+  BtcLargeTransfer,
   DashboardModule,
+  IbitHistorySyncJobStatus,
+  IbitHistorySyncResult,
   NewsEvent,
   NotifierTarget,
   Snapshot,
@@ -43,6 +46,7 @@ import type {
   StrategyConfig,
   ThemeMode,
   WhaleAddressCandidate,
+  WhaleDetail,
   WhaleTargetUpsert,
   WhaleTarget
 } from "./types/api";
@@ -104,6 +108,18 @@ type DashboardControls = {
   canTranslateNews: boolean;
 };
 
+type BtcAddressView = {
+  targetId: string;
+  targetLabel: string;
+  address: string;
+  label: string;
+  role: "confirmed" | "suspected";
+  confidence: number;
+  operations: Array<Record<string, any>>;
+  signals: Array<Record<string, any>>;
+  reasons: string[];
+};
+
 type IndicatorSettings = {
   maShortPeriod: number;
   maFastPeriod: number;
@@ -149,6 +165,7 @@ function App() {
   const [theme, setThemeState] = useState<ThemeMode>(() => readThemePreference());
   const [localLayout, setLocalLayout] = useState<Array<{ i: string; x: number; y: number; w: number; h: number }>>(() => readDashboardLayoutPreference());
   const [selectedWhaleId, setSelectedWhaleId] = useState<string | null>(null);
+  const [notice, setNotice] = useState("");
   const dashboardScrollBeforeWhaleRef = useRef<number | null>(null);
   const snapshotQuery = useQuery({ queryKey: ["snapshot"], queryFn: api.snapshot, refetchInterval: 30_000 });
   const { data, isLoading, isError } = snapshotQuery;
@@ -234,6 +251,7 @@ function App() {
       }}
       setTheme={setTheme}
     >
+      <AdminNoticeToast message={notice} onClose={() => setNotice("")} />
       {isLoading && <div className="boot">正在加载监控系统…</div>}
       {(isError || !data) && !isLoading && <div className="boot">后端暂不可用，请确认服务已启动。</div>}
       {data && view === "dashboard" && !selectedWhaleId && (
@@ -251,7 +269,7 @@ function App() {
           }}
         />
       )}
-      {data && view === "dashboard" && selectedWhaleId && <WhaleDetailPage targetId={selectedWhaleId} onBack={() => setSelectedWhaleId(null)} />}
+      {data && view === "dashboard" && selectedWhaleId && <WhaleDetailPage targetId={selectedWhaleId} onBack={() => setSelectedWhaleId(null)} setNotice={setNotice} />}
       {data && view === "admin" && <Admin data={data} />}
     </Shell>
   );
@@ -1377,9 +1395,309 @@ function WhaleTargetCard({ target, onSelect }: { target: WhaleTarget; onSelect: 
   );
 }
 
-function WhaleDetailPage({ targetId, onBack }: { targetId: string; onBack: () => void }) {
+function BtcAddressDetailCard({
+  row,
+  detail,
+  canAdmin,
+  subscribing,
+  onSubscribe
+}: {
+  row: BtcAddressView;
+  detail: WhaleDetail;
+  canAdmin: boolean;
+  subscribing: boolean;
+  onSubscribe: () => void;
+}) {
+  const account = detail.account_summary ?? {};
+  const raw = detail.snapshot?.raw ?? {};
+  const flow = raw.farside && typeof raw.farside === "object" ? raw.farside as Record<string, any> : {};
+  const latest = row.operations[0];
+  return (
+    <div className="btc-address-detail-card">
+      <div className="btc-address-detail-card__head">
+        <div>
+          <strong>{row.label}</strong>
+          <small>{row.address}</small>
+        </div>
+        {row.role !== "confirmed" && canAdmin && <button disabled={subscribing} onClick={onSubscribe}><Plus size={14} /> 订阅地址</button>}
+      </div>
+      <div className="btc-address-detail-grid">
+        <Metric label="最近方向" value={latest ? String(latest.behavior ?? latest.direction ?? "--") : "--"} />
+        <Metric label="最近金额" value={latest ? `${formatNumber(latest.amount_btc, 4)} BTC` : "--"} />
+        <Metric label="最近净额" value={latest ? `${formatNumber(latest.net_btc, 4)} BTC` : "--"} />
+        <Metric label="是否确认" value={latest ? (latest.confirmed ? "已确认" : "未确认") : "--"} />
+        <Metric label="ETF净流入/流出" value={money(account.blackrock_last_flow_usd)} tone={Number(account.blackrock_last_flow_usd ?? 0) >= 0 ? "up" : "down"} />
+        <Metric label="iShares估算持仓" value={account.blackrock_official_estimated_btc == null ? "--" : `${formatNumber(account.blackrock_official_estimated_btc, 2)} BTC`} />
+      </div>
+      <div className="btc-address-op-table">
+        {row.operations.slice(0, 8).map((operation) => (
+          <BtcAddressOperationRow key={`${row.address}-${operation.txid}-${operation.direction}`} operation={operation} />
+        ))}
+        {!row.operations.length && <span className="empty">暂无该地址底单。</span>}
+      </div>
+      <div className="btc-address-news-list">
+        {row.signals.slice(0, 4).map((signal) => (
+          <span key={newsSignalKey(signal)}>
+            {cnDateFromAny(signal.published_at)} · {String(signal.title ?? "新闻线索")} · 置信度 {formatNumber(Number(signal.confidence ?? row.confidence ?? 0) * 100, 0)}%
+          </span>
+        ))}
+        {!row.signals.length && <span className="empty">暂无新闻线索匹配。</span>}
+      </div>
+      {flow.date && <small className="btc-address-flow-note">Farside ETF资金流: {String(flow.date)} · IBIT {money(Number(flow.ibit_flow_usd_m ?? 0) * 1_000_000, { showZero: true })}</small>}
+    </div>
+  );
+}
+
+function BtcAddressOperationRow({ operation }: { operation: Record<string, any> }) {
+  const counterparties = btcCounterpartyText(operation);
+  return (
+    <div className="btc-address-op-row">
+      <strong>{cnDateFromAny(operation.timestamp ?? operation.timestamp_ms)}</strong>
+      <span>{String(operation.behavior ?? operation.direction ?? "--")}</span>
+      <span>{formatNumber(operation.amount_btc, 4)} BTC</span>
+      <span>净额 {formatNumber(operation.net_btc, 4)} BTC</span>
+      <span>{operation.confirmed ? "已确认" : "未确认"}</span>
+      <small title={String(operation.txid ?? "")}>txid {shortText(operation.txid, 12)}</small>
+      {counterparties && <small title={counterparties}>对手方 {counterparties}</small>}
+      {operation.source_url && <a href={String(operation.source_url)} target="_blank" rel="noreferrer">Blockstream</a>}
+    </div>
+  );
+}
+
+function IbitBtcAddressPanel({
+  target,
+  detail,
+  mode,
+  setNotice
+}: {
+  target: WhaleTarget;
+  detail: WhaleDetail;
+  mode: "confirmed" | "suspected";
+  setNotice: (notice: string) => void;
+}) {
+  const queryClient = useQueryClient();
+  const canAdmin = Boolean(localStorage.getItem("adminToken"));
+  const allRows = useMemo(() => ibitAddressRows(target, detail), [target, detail]);
+  const rows = mode === "confirmed" ? allRows.filter((row) => row.role === "confirmed") : allRows.filter((row) => row.role !== "confirmed");
+  const [expandedAddress, setExpandedAddress] = useState("");
+  useEffect(() => {
+    if (expandedAddress && !rows.some((row) => row.address === expandedAddress)) setExpandedAddress("");
+  }, [rows, expandedAddress]);
+  const subscribe = useMutation({
+    mutationFn: (row: BtcAddressView) => api.confirmWhaleBtcAddress(row.targetId, row.address, "confirmed", row.label || "贝莱德 / IBIT"),
+    onSuccess: (_result, row) => {
+      setNotice(`订阅成功：${shortText(row.address, 10)} 已加入监控`);
+      void queryClient.invalidateQueries({ queryKey: ["whale", target.id] });
+      void queryClient.invalidateQueries({ queryKey: ["whales"] });
+      void queryClient.invalidateQueries({ queryKey: ["snapshot"] });
+    },
+    onError: (error) => setNotice(`订阅失败：${readErrorMessage(error)}`)
+  });
+  const subscribeRow = (row: BtcAddressView) => {
+    if (isSubscribedBtcAddress(target, row.address)) {
+      setNotice(`这个 BTC 地址已经在监控中：${shortText(row.address, 10)}`);
+      return;
+    }
+    subscribe.mutate(row);
+  };
+  const title = mode === "confirmed" ? "BTC链订阅" : "疑似地址";
+  const operationCount = rows.reduce((sum, row) => sum + row.operations.length, 0);
+  return (
+    <Panel title={title} dragHandle={false}>
+      <div className="whale-summary-grid">
+        <Metric label="地址数" value={String(rows.length)} />
+        <Metric label="底单数" value={String(operationCount)} />
+        <Metric label="新闻线索" value={String(rows.reduce((sum, row) => sum + row.signals.length, 0))} />
+        <Metric label="提醒置信度" value={`${formatNumber((target.config.ibit_news_candidate_notify_min_confidence ?? 0.7) * 100, 0)}%`} />
+      </div>
+      <div className="btc-address-table">
+        {rows.map((row) => {
+          const expanded = expandedAddress === row.address;
+          const latest = row.operations[0];
+          return (
+            <div className="btc-address-table__item" key={row.address}>
+              <button className={expanded ? "btc-address-table__row active" : "btc-address-table__row"} onClick={() => setExpandedAddress(expanded ? "" : row.address)}>
+                <span>
+                  <strong>{row.label}</strong>
+                  <small>{shortText(row.address, 14)}</small>
+                </span>
+                <em className={row.role === "confirmed" ? "status on" : "status off"}>{row.role === "confirmed" ? "已订阅" : "疑似"}</em>
+                <span>{row.operations.length} 笔底单</span>
+                <span>{row.signals.length} 条新闻</span>
+                <span>{latest ? `${cnDateFromAny(latest.timestamp ?? latest.timestamp_ms)} · ${String(latest.behavior ?? latest.direction ?? "--")} ${formatNumber(latest.amount_btc, 4)} BTC` : "暂无操作"}</span>
+                <span>{row.confidence ? `置信度 ${formatNumber(row.confidence * 100, 0)}%` : "手动/配置"}</span>
+              </button>
+              {expanded && (
+                <div className="btc-address-table__detail">
+                  <BtcAddressDetailCard
+                    row={row}
+                    detail={detail}
+                    canAdmin={canAdmin}
+                    subscribing={subscribe.isPending}
+                    onSubscribe={() => subscribeRow(row)}
+                  />
+                </div>
+              )}
+            </div>
+          );
+        })}
+        {!rows.length && <span className="empty">{mode === "confirmed" ? "暂无已订阅 BTC 地址。" : "暂无疑似地址。后台手动添加的疑似地址会在这里显示，订阅后会转入 BTC 地址簇。"}</span>}
+      </div>
+    </Panel>
+  );
+}
+
+function NewsSignalMatchList({
+  matches,
+  target,
+  canAdmin,
+  subscribing,
+  onSubscribe
+}: {
+  matches: Array<{ item: Record<string, any>; signal: Record<string, any>; confidence: number }>;
+  target: WhaleTarget;
+  canAdmin: boolean;
+  subscribing: boolean;
+  onSubscribe: (address: string, label: string) => void;
+}) {
+  const subscribed = subscribedBtcAddressSet(target);
+  return (
+    <div className="news-match-address-list">
+      {matches.map(({ item, signal, confidence }) => {
+        const address = String(item.address ?? "");
+        const operation = signal.operation && typeof signal.operation === "object" ? signal.operation as Record<string, any> : Array.isArray(item.latest_operations) ? item.latest_operations[0] : undefined;
+        const reasons = Array.isArray(signal.match_reasons) && signal.match_reasons.length ? signal.match_reasons : Array.isArray(item.reasons) ? item.reasons : [];
+        const label = inferredBtcAddressLabel(signal, target);
+        const isBtc = isBtcAddress(address);
+        const isSubscribed = subscribed.has(normalizeAddress(address));
+        const operationAsset = transferAsset(operation ?? signal.large_transfer_match?.transfer ?? {});
+        return (
+          <div className="news-match-address-row" key={address}>
+            <div>
+              <strong>{label}</strong>
+              <small>{address}</small>
+            </div>
+            <div className="news-match-address-row__metrics">
+              <span>置信度 {formatNumber(confidence * 100, 0)}%</span>
+              {operation && <span>{cnDateFromAny(operation.timestamp ?? operation.timestamp_ms)} {String(operation.behavior ?? operation.direction ?? "操作")} {formatNumber(Number(operation.amount ?? operation.amount_btc ?? 0), 4)} {operationAsset}</span>}
+              {Array.isArray(signal.txids) && signal.txids.length ? <span>txid {signal.txids.map((txid: unknown) => shortText(txid, 10)).join(", ")}</span> : null}
+            </div>
+            <p>{reasons.slice(0, 4).join("；") || "新闻与链上底单存在相似时间、金额或方向特征。"}</p>
+            <div className="news-match-address-row__actions">
+              {operation?.source_url && <a href={String(operation.source_url)} target="_blank" rel="noreferrer">{transferExplorerLabel(operation)}</a>}
+              {!isBtc ? <span className="status off">ETH候选</span> : isSubscribed ? <span className="status on">已订阅</span> : canAdmin ? <button disabled={subscribing || !address} onClick={() => onSubscribe(address, label)}><Plus size={14} /> 订阅地址</button> : <span className="status off">未订阅</span>}
+            </div>
+          </div>
+        );
+      })}
+      {!matches.length && <span className="empty">这条新闻暂无匹配地址。</span>}
+    </div>
+  );
+}
+
+function inferredBtcAddressLabel(signal: Record<string, any>, target: WhaleTarget) {
+  const text = `${String(signal.title ?? "")} ${String(signal.summary ?? "")} ${String(signal.behavior ?? "")}`;
+  if (/blackrock|ibit|贝莱德/i.test(text)) return "贝莱德 / IBIT";
+  return target.label || "BTC 地址";
+}
+
+function isIbitHistoryJobRunning(job: IbitHistorySyncJobStatus | null) {
+  return job?.status === "pending" || job?.status === "running";
+}
+
+function useIbitHistorySyncJob(targetId: string, onResult?: (result: IbitHistorySyncResult) => void) {
+  const queryClient = useQueryClient();
+  const [job, setJob] = useState<IbitHistorySyncJobStatus | null>(null);
+  const terminalJobRef = useRef("");
+  const startMutation = useMutation({
+    mutationFn: () => api.startIbitHistorySyncJob(targetId, { lookback_days: 30, max_news_items: 300 }),
+    onSuccess: (nextJob) => {
+      terminalJobRef.current = "";
+      setJob(nextJob);
+    },
+    onError: (error) => {
+      const now = new Date().toISOString();
+      setJob({
+        job_id: `local-${Date.now()}`,
+        target_id: targetId,
+        status: "failed",
+        stage: "启动失败",
+        message: readErrorMessage(error),
+        progress: 100,
+        current: 0,
+        total: 100,
+        started_at: now,
+        updated_at: now,
+        completed_at: now,
+        result: null
+      });
+    }
+  });
+  const running = isIbitHistoryJobRunning(job);
+  const jobId = job?.job_id ?? "";
+  const jobQuery = useQuery({
+    queryKey: ["ibit-history-sync-job", targetId, jobId],
+    queryFn: () => api.ibitHistorySyncJob(targetId, jobId),
+    enabled: Boolean(jobId && running && !jobId.startsWith("local-")),
+    refetchInterval: running ? 1500 : false
+  });
+  useEffect(() => {
+    const nextJob = jobQuery.data;
+    if (!nextJob) return;
+    setJob(nextJob);
+    if ((nextJob.status === "completed" || nextJob.status === "failed") && terminalJobRef.current !== nextJob.job_id) {
+      terminalJobRef.current = nextJob.job_id;
+      if (nextJob.result) onResult?.(nextJob.result);
+      void queryClient.invalidateQueries({ queryKey: ["whale", targetId] });
+      void queryClient.invalidateQueries({ queryKey: ["whales"] });
+      void queryClient.invalidateQueries({ queryKey: ["btc-large-transfer-stats"] });
+      void queryClient.invalidateQueries({ queryKey: ["btc-large-transfers"] });
+      void queryClient.invalidateQueries({ queryKey: ["snapshot"] });
+    }
+  }, [jobQuery.data, onResult, queryClient, targetId]);
+  return {
+    job,
+    start: () => startMutation.mutate(),
+    isRunning: running || startMutation.isPending,
+    isStarting: startMutation.isPending
+  };
+}
+
+function IbitHistoryProgress({ job, compact = false }: { job: IbitHistorySyncJobStatus; compact?: boolean }) {
+  const progress = Math.max(0, Math.min(100, Number(job.progress ?? 0)));
+  const statusLabel = job.status === "completed" ? "完成" : job.status === "failed" ? "失败" : job.status === "pending" ? "排队" : "回扫中";
+  const countText = job.total > 0 ? `${job.current}/${job.total}` : "";
+  return (
+    <div className={compact ? "history-progress compact" : "history-progress"}>
+      <div className="history-progress__head">
+        <strong>{job.stage || "IBIT 历史回扫"}</strong>
+        <span>{statusLabel} · {formatNumber(progress, 0)}%{countText ? ` · ${countText}` : ""}</span>
+      </div>
+      <div className="history-progress__bar" aria-label="IBIT history sync progress">
+        <span style={{ width: `${progress}%` }} />
+      </div>
+      {job.message && <small>{job.message}</small>}
+    </div>
+  );
+}
+
+function WhaleDetailPage({ targetId, onBack, setNotice }: { targetId: string; onBack: () => void; setNotice: (notice: string) => void }) {
+  const queryClient = useQueryClient();
   const { data, isLoading } = useQuery({ queryKey: ["whale", targetId], queryFn: () => api.whaleDetail(targetId) });
-  const [tab, setTab] = useState<"basic" | "contracts" | "fills" | "spot" | "orders" | "ledger" | "history" | "events">("contracts");
+  const [tab, setTab] = useState<"basic" | "contracts" | "fills" | "spot" | "orders" | "ledger" | "history" | "flows" | "btcCluster" | "btcLargeTransfers" | "suspectedAddresses" | "newsSignals" | "events">("contracts");
+  const [selectedIbitNewsId, setSelectedIbitNewsId] = useState("");
+  const [historyResult, setHistoryResult] = useState<IbitHistorySyncResult | null>(null);
+  const historySync = useIbitHistorySyncJob(targetId, setHistoryResult);
+  const subscribeNewsAddress = useMutation({
+    mutationFn: ({ address, label }: { address: string; label: string }) => api.confirmWhaleBtcAddress(targetId, address, "confirmed", label),
+    onSuccess: (_result, variables) => {
+      setNotice(`订阅成功：${shortText(variables.address, 10)} 已加入监控`);
+      void queryClient.invalidateQueries({ queryKey: ["whale", targetId] });
+      void queryClient.invalidateQueries({ queryKey: ["whales"] });
+      void queryClient.invalidateQueries({ queryKey: ["snapshot"] });
+    },
+    onError: (error) => setNotice(`订阅失败：${readErrorMessage(error)}`)
+  });
   if (isLoading || !data) return <div className="boot">正在加载地址详情…</div>;
   const target = data.target;
   const positions = data.positions;
@@ -1393,6 +1711,17 @@ function WhaleDetailPage({ targetId, onBack }: { targetId: string; onBack: () =>
   const account = data.account_summary ?? {};
   const sourceStatus = data.snapshot?.source_status ?? {};
   const tags = whaleTags(target.config.tags);
+  const isBlackRockFree = isBlackRockTarget(target) || account.source === "blackrock_free";
+  const activeTab = isBlackRockFree && !["basic", "flows", "btcCluster", "btcLargeTransfers", "suspectedAddresses", "newsSignals", "events"].includes(tab) ? "basic" : tab;
+  const raw = data.snapshot?.raw ?? {};
+  const blackrockFlow = raw.farside && typeof raw.farside === "object" ? raw.farside as Record<string, any> : {};
+  const blackrockCluster = raw.btc_cluster && typeof raw.btc_cluster === "object" ? raw.btc_cluster as Record<string, any> : {};
+  const ibitNewsSignals = raw.news_signals && typeof raw.news_signals === "object" ? raw.news_signals as Record<string, any> : {};
+  const historyWorkflow = historyResult ?? (raw.history_workflow && typeof raw.history_workflow === "object" ? raw.history_workflow as IbitHistorySyncResult : null);
+  const ibitSignalRows = Array.isArray(ibitNewsSignals.signals) ? ibitNewsSignals.signals as Record<string, any>[] : [];
+  const suspectedAddresses = Array.isArray(ibitNewsSignals.suspected_addresses) ? ibitNewsSignals.suspected_addresses as Record<string, any>[] : [];
+  const suspectedAddressPool = arr(ibitNewsSignals.suspected_address_pool ?? target.config.suspected_btc_addresses);
+  const matchedAddressCount = newsMatchedAddressCount(ibitSignalRows, suspectedAddresses);
   return (
     <div className="whale-detail">
       <div className="whale-detail__hero">
@@ -1406,24 +1735,52 @@ function WhaleDetailPage({ targetId, onBack }: { targetId: string; onBack: () =>
         <span className={target.enabled ? "status on" : "status off"}>{target.enabled ? "关注中" : "已关闭"}</span>
       </div>
       <div className="whale-tabs">
-        <button className={tab === "basic" ? "active" : ""} onClick={() => setTab("basic")}>基本信息</button>
-        <button className={tab === "contracts" ? "active" : ""} onClick={() => setTab("contracts")}>合约 ({positions.length})</button>
-        <button className={tab === "fills" ? "active" : ""} onClick={() => setTab("fills")}>最近成交 ({fills.length})</button>
-        <button className={tab === "spot" ? "active" : ""} onClick={() => setTab("spot")}>现货/DeFi ({holdings.length + defiPositions.length})</button>
-        <button className={tab === "orders" ? "active" : ""} onClick={() => setTab("orders")}>当前委托 ({openOrders.length})</button>
-        <button className={tab === "ledger" ? "active" : ""} onClick={() => setTab("ledger")}>资金流水 ({funding.length + ledgerUpdates.length})</button>
-        <button className={tab === "history" ? "active" : ""} onClick={() => setTab("history")}>历史订单 ({historicalOrders.length})</button>
-        <button className={tab === "events" ? "active" : ""} onClick={() => setTab("events")}>最近动态</button>
+        <button className={activeTab === "basic" ? "active" : ""} onClick={() => setTab("basic")}>基本信息</button>
+        {isBlackRockFree ? (
+          <>
+            <button className={activeTab === "flows" ? "active" : ""} onClick={() => setTab("flows")}>ETF资金流</button>
+            <button className={activeTab === "btcCluster" ? "active" : ""} onClick={() => setTab("btcCluster")}>BTC地址簇</button>
+            <button className={activeTab === "btcLargeTransfers" ? "active" : ""} onClick={() => setTab("btcLargeTransfers")}>链上大额底表</button>
+            <button className={activeTab === "suspectedAddresses" ? "active" : ""} onClick={() => setTab("suspectedAddresses")}>疑似地址</button>
+            <button className={activeTab === "newsSignals" ? "active" : ""} onClick={() => setTab("newsSignals")}>新闻线索</button>
+            <button className={activeTab === "events" ? "active" : ""} onClick={() => setTab("events")}>最近动态</button>
+          </>
+        ) : (
+          <>
+            <button className={activeTab === "contracts" ? "active" : ""} onClick={() => setTab("contracts")}>合约 ({positions.length})</button>
+            <button className={activeTab === "fills" ? "active" : ""} onClick={() => setTab("fills")}>最近成交 ({fills.length})</button>
+            <button className={activeTab === "spot" ? "active" : ""} onClick={() => setTab("spot")}>现货/DeFi ({holdings.length + defiPositions.length})</button>
+            <button className={activeTab === "orders" ? "active" : ""} onClick={() => setTab("orders")}>当前委托 ({openOrders.length})</button>
+            <button className={activeTab === "ledger" ? "active" : ""} onClick={() => setTab("ledger")}>资金流水 ({funding.length + ledgerUpdates.length})</button>
+            <button className={activeTab === "history" ? "active" : ""} onClick={() => setTab("history")}>历史订单 ({historicalOrders.length})</button>
+            <button className={activeTab === "events" ? "active" : ""} onClick={() => setTab("events")}>最近动态</button>
+          </>
+        )}
       </div>
-      {tab === "basic" && (
+      {activeTab === "basic" && (
         <Panel title="基本信息" dragHandle={false} action={data.updated_at ? <span className="pill">更新 {cnDate(data.updated_at)}</span> : undefined}>
           <div className="whale-summary-grid">
-            <Metric label="合约名义价值" value={money(account.contract_notional)} />
-            <Metric label="合约未实现盈亏" value={money(account.contract_pnl)} tone={Number(account.contract_pnl ?? 0) >= 0 ? "up" : "down"} />
-            <Metric label="现货资产" value={money(account.spot_value ?? account.total_balance)} />
-            <Metric label="DeFi 仓位" value={money(account.defi_value)} />
-            <Metric label="可提现" value={money(account.withdrawable, { showZero: true })} />
-            <Metric label="保证金占用" value={money(account.total_margin_used)} />
+            {isBlackRockFree ? (
+              <>
+                <Metric label="IBIT官方净资产" value={money(account.blackrock_official_net_assets)} />
+                <Metric label="估算BTC持仓" value={account.blackrock_official_estimated_btc == null ? "--" : `${formatNumber(account.blackrock_official_estimated_btc, 2)} BTC`} />
+                <Metric label="官方BTC基准价" value={money(account.blackrock_official_benchmark_price)} />
+                <Metric label="最新IBIT资金流" value={money(account.blackrock_last_flow_usd)} tone={Number(account.blackrock_last_flow_usd ?? 0) >= 0 ? "up" : "down"} />
+                <Metric label="资金流日期" value={String(account.blackrock_last_flow_date ?? "--")} />
+                <Metric label="已确认地址数" value={String(account.blackrock_btc_cluster_address_count ?? 0)} />
+                <Metric label="疑似地址数" value={String(account.ibit_suspected_address_count ?? suspectedAddresses.length)} />
+                <Metric label="底表新闻命中" value={String(account.ibit_btc_large_transfer_match_count ?? 0)} />
+              </>
+            ) : (
+              <>
+                <Metric label="合约名义价值" value={money(account.contract_notional)} />
+                <Metric label="合约未实现盈亏" value={money(account.contract_pnl)} tone={Number(account.contract_pnl ?? 0) >= 0 ? "up" : "down"} />
+                <Metric label="现货资产" value={money(account.spot_value ?? account.total_balance)} />
+                <Metric label="DeFi 仓位" value={money(account.defi_value)} />
+                <Metric label="可提现" value={money(account.withdrawable, { showZero: true })} />
+                <Metric label="保证金占用" value={money(account.total_margin_used)} />
+              </>
+            )}
           </div>
           <div className="records compact">
             {Object.entries(sourceStatus).map(([source, status]) => {
@@ -1434,7 +1791,164 @@ function WhaleDetailPage({ targetId, onBack }: { targetId: string; onBack: () =>
           </div>
         </Panel>
       )}
-      {tab === "contracts" && (
+      {activeTab === "flows" && isBlackRockFree && (
+        <Panel title="ETF资金流（非ETH链）" dragHandle={false}>
+          <div className="whale-summary-grid">
+            <Metric label="IBIT最新ETF净流入/流出" value={money(account.blackrock_last_flow_usd)} tone={Number(account.blackrock_last_flow_usd ?? 0) >= 0 ? "up" : "down"} />
+            <Metric label="ETF资金流日期" value={String(account.blackrock_last_flow_date ?? "--")} />
+            <Metric label="ETF净流入阈值" value={money(target.config.blackrock_flow_alert_min_usd ?? 50000000)} />
+          </div>
+          <div className="records compact">
+            {blackrockFlow.values && typeof blackrockFlow.values === "object" ? Object.entries(blackrockFlow.values).map(([name, value]) => (
+              <span key={name}>{name}: {typeof value === "number" ? `${formatNumber(value, 1)}M` : String(value)}</span>
+            )) : <span className="empty">暂无 Farside ETF 资金流明细</span>}
+          </div>
+        </Panel>
+      )}
+      {activeTab === "btcCluster" && isBlackRockFree && <IbitBtcAddressPanel target={target} detail={data} mode="confirmed" setNotice={setNotice} />}
+      {false && activeTab === "btcCluster" && isBlackRockFree && (
+        <Panel title="BTC地址簇" dragHandle={false}>
+          <div className="whale-summary-grid">
+            <Metric label="已确认地址数" value={String(account.blackrock_btc_cluster_address_count ?? arr(target.config.btc_addresses).length)} />
+            <Metric label="大额转出笔数" value={String(account.blackrock_btc_cluster_transfer_count ?? 0)} />
+            <Metric label="逐笔操作数" value={String(account.blackrock_btc_cluster_operation_count ?? addressActivityCount(blackrockCluster.address_activity))} />
+            <Metric label="转出阈值" value={`${formatNumber(target.config.blackrock_btc_transfer_min_btc ?? 1000, 0)} BTC`} />
+          </div>
+          <div className="records compact">
+            {arr(blackrockCluster.addresses ?? target.config.btc_addresses).map((address) => <span key={address}>{address}</span>)}
+            {!arr(blackrockCluster.addresses ?? target.config.btc_addresses).length && <span className="empty">未配置已确认 BTC 地址簇；只会监控官方日频和 ETF 资金流</span>}
+          </div>
+          <div className="records">
+            {Array.isArray(blackrockCluster.transfers) && blackrockCluster.transfers.map((transfer: Record<string, any>) => (
+              <span key={String(transfer.txid)}>
+                {cnDateFromAny(transfer.timestamp ?? transfer.timestamp_ms)} · 转出 {formatNumber(transfer.amount_btc, 4)} BTC · {String(transfer.txid ?? "--")}
+              </span>
+            ))}
+            {(!Array.isArray(blackrockCluster.transfers) || !blackrockCluster.transfers.length) && <span className="empty">暂无超过阈值的地址簇转出</span>}
+          </div>
+          <div className="records">
+            {addressActivityRows(blackrockCluster.address_activity).map((operation) => (
+              <span key={`${operation.address}-${operation.txid}`}>
+                {cnDateFromAny(operation.timestamp ?? operation.timestamp_ms)} · {shortText(operation.address, 10)} · {String(operation.behavior ?? operation.direction ?? "操作")} {formatNumber(operation.amount_btc, 4)} BTC · 净额 {formatNumber(operation.net_btc, 4)} BTC · {shortText(operation.txid, 12)}
+              </span>
+            ))}
+            {!addressActivityRows(blackrockCluster.address_activity).length && <span className="empty">暂无已确认地址的逐笔链上操作</span>}
+          </div>
+        </Panel>
+      )}
+      {activeTab === "btcLargeTransfers" && isBlackRockFree && (
+        <IbitBtcLargeTransferPanel targetId={target.id} detail={data} setNotice={setNotice} />
+      )}
+      {activeTab === "suspectedAddresses" && isBlackRockFree && <IbitBtcAddressPanel target={target} detail={data} mode="suspected" setNotice={setNotice} />}
+      {false && activeTab === "suspectedAddresses" && isBlackRockFree && (
+        <Panel title="疑似地址" dragHandle={false}>
+          <div className="whale-summary-grid">
+            <Metric label="疑似地址数" value={String(suspectedAddresses.length)} />
+            <Metric label="候选池地址" value={String(suspectedAddressPool.length)} />
+            <Metric label="新闻线索数" value={String(account.ibit_news_candidate_count ?? arr(ibitNewsSignals.signals).length)} />
+            <Metric label="提醒置信度" value={`${formatNumber((target.config.ibit_news_candidate_notify_min_confidence ?? 0.7) * 100, 0)}%`} />
+          </div>
+          <div className="records">
+            {suspectedAddresses.map((item) => (
+              <span key={String(item.address)}>
+                {String(item.address)} · 置信度 {formatNumber(Number(item.confidence ?? 0) * 100, 0)}% · 线索 {Number(item.signal_count ?? (Array.isArray(item.signals) ? item.signals.length : 0))} 条
+                {Array.isArray(item.latest_operations) && item.latest_operations[0] ? ` · 最新${String(item.latest_operations[0].behavior ?? "操作")} ${formatNumber(item.latest_operations[0].amount_btc, 4)} BTC` : ""}
+                {Array.isArray(item.txids) && item.txids.length ? ` · txid ${item.txids.map((txid: unknown) => shortText(txid, 10)).join(", ")}` : ""}
+                {Array.isArray(item.signals) && item.signals[0] ? ` · ${String(item.signals[0].behavior ?? "")} · ${String(item.signals[0].title ?? "")}` : ""}
+                {Array.isArray(item.reasons) && item.reasons.length ? ` · 依据：${item.reasons.slice(0, 4).join("；")}` : ""}
+              </span>
+            ))}
+            {!suspectedAddresses.length && <span className="empty">暂无疑似地址。系统会先采集 BTC/ETH 链上大额底表，再把新闻的时间、金额和方向与底表交易做相似匹配；也可以在后台补充候选地址池。</span>}
+          </div>
+        </Panel>
+      )}
+      {activeTab === "newsSignals" && isBlackRockFree && (
+        <Panel
+          title="新闻线索"
+          dragHandle={false}
+          action={<button disabled={historySync.isRunning} onClick={historySync.start}><RefreshCw size={16} /> {historySync.isRunning ? "回扫中" : "回扫30天"}</button>}
+        >
+          <div className="whale-summary-grid whale-summary-grid--compact news-signal-summary">
+            <Metric label="线索数量" value={String(account.ibit_news_candidate_count ?? ibitSignalRows.length)} />
+            <Metric label="新闻源数量" value={String(arr(ibitNewsSignals.feed_urls ?? target.config.ibit_news_rss_urls).length)} />
+            <Metric label="匹配地址" value={String(matchedAddressCount)} />
+            <Metric label="提醒置信度" value={`${formatNumber((target.config.ibit_news_candidate_notify_min_confidence ?? 0.6) * 100, 0)}%`} />
+          </div>
+          {historySync.job && <IbitHistoryProgress job={historySync.job} />}
+          {historyWorkflow && (
+            <div className="records compact history-workflow">
+              <span>工作流: {historyWorkflow.ok ? "完成" : "失败"} · 回看 {historyWorkflow.lookback_days} 天 · 地址 {historyWorkflow.address_count} 个 · 账户底单 {historyWorkflow.account_operation_count} 条 · 新闻 {historyWorkflow.news_signal_count} 条 · 匹配地址 {historyWorkflow.matched_address_count} 个 · 底表命中 {historyWorkflow.large_transfer_match_count} 条</span>
+              {historyWorkflow.message && <span>{historyWorkflow.message}</span>}
+            </div>
+          )}
+          <div className="news-match-stack">
+            {ibitSignalRows.map((signal) => {
+              const key = newsSignalKey(signal);
+              const matches = suspectedMatchesForSignal(suspectedAddresses, signal);
+              const expanded = selectedIbitNewsId === key;
+              const btcAmounts = Array.isArray(signal.btc_amounts) ? signal.btc_amounts : [];
+              const ethAmounts = Array.isArray(signal.eth_amounts) ? signal.eth_amounts : [];
+              const usdAmounts = Array.isArray(signal.usd_amounts) ? signal.usd_amounts : [];
+              const txidCount = Array.isArray(signal.txids) ? signal.txids.length : 0;
+              return (
+                <div className="news-match-card" key={key}>
+                  <button className="news-match-card__button" onClick={() => setSelectedIbitNewsId(expanded ? "" : key)}>
+                    <span className="news-match-card__main">
+                      <span className="news-match-card__title-line">
+                        <small>{cnDateFromAny(signal.published_at)}</small>
+                        <strong>{String(signal.title ?? "IBIT 新闻线索")}</strong>
+                      </span>
+                      <span className="news-match-card__meta">
+                        <span>置信度 {formatNumber(Number(signal.confidence ?? 0) * 100, 0)}%</span>
+                        {matches.length ? <span>匹配地址 {matches.length} 个</span> : null}
+                        {txidCount ? <span>txid {txidCount} 个</span> : null}
+                        {btcAmounts.length ? <span>{btcAmounts.map((value: unknown) => `${formatNumber(value, 4)} BTC`).join(" / ")}</span> : null}
+                        {ethAmounts.length ? <span>{ethAmounts.map((value: unknown) => `${formatNumber(value, 4)} ETH`).join(" / ")}</span> : null}
+                        {usdAmounts.length ? <span>{usdAmounts.map((value: unknown) => money(value)).join(" / ")}</span> : null}
+                      </span>
+                    </span>
+                    <em>{expanded ? "收起" : "查看匹配"}</em>
+                  </button>
+                  {expanded && (
+                    <NewsSignalMatchList
+                      matches={matches}
+                      target={target}
+                      canAdmin={Boolean(localStorage.getItem("adminToken"))}
+                      subscribing={subscribeNewsAddress.isPending}
+                      onSubscribe={(address, label) => {
+                        if (isSubscribedBtcAddress(target, address)) {
+                          setNotice(`这个 BTC 地址已经在监控中：${shortText(address, 10)}`);
+                          return;
+                        }
+                        subscribeNewsAddress.mutate({ address, label });
+                      }}
+                    />
+                  )}
+                  {false && expanded && (
+                    <div className="records news-match-card__detail">
+                      {matches.map(({ item, signal, confidence }) => {
+                        const operation = signal.operation && typeof signal.operation === "object" ? signal.operation as Record<string, any> : Array.isArray(item.latest_operations) ? item.latest_operations[0] : undefined;
+                        const reasons = Array.isArray(signal.match_reasons) && signal.match_reasons.length ? signal.match_reasons : Array.isArray(item.reasons) ? item.reasons : [];
+                        return (
+                          <span key={String(item.address)}>
+                            {String(item.address)} · 置信度 {formatNumber(confidence * 100, 0)}%
+                            {operation ? ` · ${cnDateFromAny(operation.timestamp ?? operation.timestamp_ms)} ${String(operation.behavior ?? operation.direction ?? "操作")} ${formatNumber(operation.amount_btc, 4)} BTC` : ""}
+                            {Array.isArray(signal.txids) && signal.txids.length ? ` · txid ${signal.txids.map((txid: unknown) => shortText(txid, 10)).join(", ")}` : ""}
+                            {reasons.length ? ` · 依据：${reasons.slice(0, 4).join("；")}` : ""}
+                          </span>
+                        );
+                      })}
+                      {!matches.length && <span className="empty">这条新闻暂无匹配地址</span>}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+            {!ibitSignalRows.length && <span className="empty">暂无新闻线索。启用 IBIT 新闻线索并配置 RSS 源后，系统会提取 BTC/ETH 金额、方向、txid 和地址，并与链上大额底表做疑似匹配。</span>}
+          </div>
+        </Panel>
+      )}
+      {activeTab === "contracts" && !isBlackRockFree && (
         <Panel title="持仓列表" dragHandle={false} action={<span className="pill">共 {positions.length} 个持仓</span>}>
           <div className="position-list">
             {positions.map((position, index) => <PositionCard key={index} position={position} />)}
@@ -1442,7 +1956,7 @@ function WhaleDetailPage({ targetId, onBack }: { targetId: string; onBack: () =>
           </div>
         </Panel>
       )}
-      {tab === "spot" && (
+      {activeTab === "spot" && !isBlackRockFree && (
         <Panel title="现货与 DeFi 仓位" dragHandle={false} action={<span className="pill">{holdings.length} 现货 / {defiPositions.length} 协议</span>}>
           <div className="asset-list">
             {holdings.map((holding, index) => <AssetCard key={`holding-${index}`} item={holding} />)}
@@ -1451,7 +1965,7 @@ function WhaleDetailPage({ targetId, onBack }: { targetId: string; onBack: () =>
           </div>
         </Panel>
       )}
-      {tab === "fills" && (
+      {activeTab === "fills" && !isBlackRockFree && (
         <Panel title="最近成交" dragHandle={false} action={<span className="pill">共 {fills.length} 笔</span>}>
           <div className="whale-table">
             {fills.map((fill, index) => <WhaleFillRow key={`${fill.hash ?? fill.trade_id ?? index}`} fill={fill} isLarge={isLargeTrade(fill, target.config)} />)}
@@ -1459,7 +1973,7 @@ function WhaleDetailPage({ targetId, onBack }: { targetId: string; onBack: () =>
           </div>
         </Panel>
       )}
-      {tab === "orders" && (
+      {activeTab === "orders" && !isBlackRockFree && (
         <Panel title="当前委托" dragHandle={false}>
           <div className="records">
             {openOrders.map((order, index) => <OrderRow key={index} order={order} />)}
@@ -1467,7 +1981,7 @@ function WhaleDetailPage({ targetId, onBack }: { targetId: string; onBack: () =>
           </div>
         </Panel>
       )}
-      {tab === "ledger" && (
+      {activeTab === "ledger" && !isBlackRockFree && (
         <Panel title="资金流水与资金费" dragHandle={false}>
           <div className="whale-table">
             {funding.map((item, index) => <FundingRow key={`funding-${index}`} item={item} />)}
@@ -1476,7 +1990,7 @@ function WhaleDetailPage({ targetId, onBack }: { targetId: string; onBack: () =>
           </div>
         </Panel>
       )}
-      {tab === "history" && (
+      {activeTab === "history" && !isBlackRockFree && (
         <Panel title="历史订单" dragHandle={false}>
           <div className="whale-table">
             {historicalOrders.map((order, index) => <OrderRow key={index} order={order} />)}
@@ -1484,7 +1998,7 @@ function WhaleDetailPage({ targetId, onBack }: { targetId: string; onBack: () =>
           </div>
         </Panel>
       )}
-      {tab === "events" && (
+      {activeTab === "events" && (
         <Panel title="操作动态" dragHandle={false}>
           <div className="records">
             {data.recent_events.map((event) => {
@@ -1500,6 +2014,322 @@ function WhaleDetailPage({ targetId, onBack }: { targetId: string; onBack: () =>
           </div>
         </Panel>
       )}
+    </div>
+  );
+}
+
+function IbitBtcLargeTransferPanel({
+  targetId,
+  detail,
+  setNotice
+}: {
+  targetId: string;
+  detail?: WhaleDetail;
+  setNotice: (notice: string) => void;
+}) {
+  const queryClient = useQueryClient();
+  const [minBtc, setMinBtc] = useState(0);
+  const [query, setQuery] = useState("");
+  const [matchedOnly, setMatchedOnly] = useState(false);
+  const [selectedTxid, setSelectedTxid] = useState("");
+  const [historyStart, setHistoryStart] = useState("");
+  const [historyEnd, setHistoryEnd] = useState("");
+  const [historyMaxBlocks, setHistoryMaxBlocks] = useState(24);
+  const [rescanSummary, setRescanSummary] = useState("");
+  const canAdmin = Boolean(localStorage.getItem("adminToken"));
+  const subscribedAddresses = useMemo(() => subscribedBtcAddressSet(detail?.target), [detail?.target]);
+  const statsQuery = useQuery({ queryKey: ["btc-large-transfer-stats"], queryFn: api.btcLargeTransferStats, refetchInterval: 30_000 });
+  const transfersQuery = useQuery({
+    queryKey: ["btc-large-transfers", minBtc, query, matchedOnly],
+    queryFn: () => api.btcLargeTransfers({ limit: 50, min_btc: minBtc, query, matched_only: matchedOnly }),
+    refetchInterval: 30_000
+  });
+  const detailQuery = useQuery({
+    queryKey: ["btc-large-transfer", selectedTxid],
+    queryFn: () => api.btcLargeTransfer(selectedTxid),
+    enabled: Boolean(selectedTxid)
+  });
+  const rescan = useMutation({
+    mutationFn: (payload: number | { blocks?: number | null; start_utc?: string; end_utc?: string; max_blocks?: number }) => api.rescanBtcLargeTransfers(payload),
+    onSuccess: (result) => {
+      setRescanSummary(`已扫描 BTC ${result.scanned_blocks} 块，新增 ${result.inserted} 笔；ETH ${result.scanned_eth_blocks ?? 0} 块，新增 ${result.inserted_eth ?? 0} 笔${result.start_height && result.end_height ? `，BTC 高度 ${result.start_height}-${result.end_height}` : ""}${result.message ? `，${result.message}` : ""}`);
+      void queryClient.invalidateQueries({ queryKey: ["btc-large-transfer-stats"] });
+      void queryClient.invalidateQueries({ queryKey: ["btc-large-transfers"] });
+      void queryClient.invalidateQueries({ queryKey: ["snapshot"] });
+    }
+  });
+  const ibitHistorySync = useIbitHistorySyncJob(targetId, (result) => {
+    setRescanSummary(`IBIT 30天回扫完成：底单 ${result.account_operation_count} 条，ETH底表 ${result.eth_large_transfer_inserted ?? 0} 条，新闻 ${result.news_signal_count} 条，匹配地址 ${result.matched_address_count} 个${result.message ? `，${result.message}` : ""}`);
+  });
+  const confirmAddress = useMutation({
+    mutationFn: ({ address, role }: { address: string; role: "candidate" | "confirmed" }) => api.confirmWhaleBtcAddress(targetId, address, role),
+    onSuccess: (_result, variables) => {
+      setNotice(`订阅成功：${shortText(variables.address, 10)} 已加入监控`);
+      void queryClient.invalidateQueries({ queryKey: ["whale", targetId] });
+      void queryClient.invalidateQueries({ queryKey: ["whales"] });
+      void queryClient.invalidateQueries({ queryKey: ["snapshot"] });
+    },
+    onError: (error) => setNotice(`订阅失败：${readErrorMessage(error)}`)
+  });
+  const subscribeAddress = (address: string, role: "candidate" | "confirmed") => {
+    if (role === "confirmed" && subscribedAddresses.has(normalizeAddress(address))) {
+      setNotice(`这个 BTC 地址已经在监控中：${shortText(address, 10)}`);
+      return;
+    }
+    confirmAddress.mutate({ address, role });
+  };
+  const stats = statsQuery.data;
+  const transfers = transfersQuery.data?.items ?? [];
+  const fallbackOperations = useMemo(() => {
+    const raw = detail?.snapshot?.raw ?? {};
+    const cluster = raw.btc_cluster && typeof raw.btc_cluster === "object" ? raw.btc_cluster as Record<string, any> : {};
+    const queryText = query.trim().toLowerCase();
+    return addressActivityRows(cluster.address_activity)
+      .filter((operation) => Number(operation.amount_btc ?? 0) >= minBtc)
+      .filter((operation) => !queryText || String(operation.txid ?? "").toLowerCase().includes(queryText) || String(operation.address ?? "").toLowerCase().includes(queryText));
+  }, [detail, minBtc, query]);
+  const selectedOperation = selectedTxid ? fallbackOperations.find((operation) => String(operation.txid ?? "") === selectedTxid) : undefined;
+  const selectedTransfer = detailQuery.data ?? transfers.find((item) => item.txid === selectedTxid);
+  const minEthThreshold = stats?.min_eth ?? 5000;
+  return (
+    <Panel
+      title="链上大额底表"
+      dragHandle={false}
+      action={
+        <div className="panel-actions">
+          {canAdmin && <button onClick={ibitHistorySync.start} disabled={ibitHistorySync.isRunning}><RefreshCw size={14} /> {ibitHistorySync.isRunning ? "回扫中" : "回扫30天IBIT"}</button>}
+          <button onClick={() => transfersQuery.refetch()} disabled={transfersQuery.isFetching}><RefreshCw size={14} /> 刷新</button>
+          {canAdmin && <button onClick={() => rescan.mutate(3)} disabled={rescan.isPending}><Database size={14} /> 补扫3块</button>}
+        </div>
+      }
+    >
+      <div className="whale-summary-grid">
+        <Metric label="已记录交易" value={String(stats?.total ?? 0)} />
+        <Metric label="今日新增" value={String(stats?.today_count ?? 0)} />
+        <Metric label="新闻命中" value={String(stats?.matched_count ?? 0)} />
+        <Metric label="BTC最新高度" value={stats?.latest_scanned_height ? String(stats.latest_scanned_height) : "--"} />
+        <Metric label="ETH最新高度" value={stats?.latest_eth_scanned_height ? String(stats.latest_eth_scanned_height) : "--"} />
+        <Metric label="当前阈值" value={`${formatNumber(stats?.min_btc ?? minBtc, 0)} BTC / ${formatNumber(minEthThreshold, 0)} ETH`} />
+      </div>
+      {ibitHistorySync.job && <IbitHistoryProgress job={ibitHistorySync.job} compact />}
+      {canAdmin && (
+        <div className="btc-history-rescan">
+          <label>
+            <span>历史开始</span>
+            <input type="datetime-local" value={historyStart} onChange={(event) => setHistoryStart(event.target.value)} />
+          </label>
+          <label>
+            <span>历史结束</span>
+            <input type="datetime-local" value={historyEnd} onChange={(event) => setHistoryEnd(event.target.value)} />
+          </label>
+          <label>
+            <span>最多区块</span>
+            <input type="number" min={1} max={288} value={historyMaxBlocks} onChange={(event) => setHistoryMaxBlocks(Math.max(1, Math.min(288, Number(event.target.value) || 1)))} />
+          </label>
+          <button
+            disabled={rescan.isPending || !historyStart || !historyEnd}
+            onClick={() => rescan.mutate({ blocks: null, start_utc: localDateTimeToIso(historyStart), end_utc: localDateTimeToIso(historyEnd), max_blocks: historyMaxBlocks })}
+          >
+            <Database size={14} /> 历史回扫
+          </button>
+          {rescanSummary && <small>{rescanSummary}</small>}
+        </div>
+      )}
+      <div className="btc-transfer-toolbar">
+        <label>
+          <span>最小数量</span>
+          <input type="number" value={minBtc} min={0} onChange={(event) => setMinBtc(Math.max(0, Number(event.target.value) || 0))} />
+        </label>
+        <label>
+          <span>txid / 地址 / 币种</span>
+          <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索 txid、地址、BTC 或 ETH" />
+        </label>
+        <label className="checkbox-row">
+          <input type="checkbox" checked={matchedOnly} onChange={(event) => setMatchedOnly(event.target.checked)} />
+          <span>只看新闻命中</span>
+        </label>
+      </div>
+      <div className="btc-transfer-table">
+        {transfers.map((transfer) => {
+          const expanded = selectedTxid === transfer.txid;
+          const detail = expanded ? (detailQuery.data ?? transfer) : transfer;
+          return (
+            <div className="btc-transfer-table__item" key={transfer.txid}>
+              <button
+                className={expanded ? "btc-transfer-table__row active" : "btc-transfer-table__row"}
+                onClick={() => setSelectedTxid(expanded ? "" : transfer.txid)}
+              >
+                <strong>{transferAmountText(transfer)}</strong>
+                <span>{cnDate(transfer.block_time_utc)}</span>
+                <span>高度 {transfer.block_height}</span>
+                <span>输入 {transfer.input_addresses.length} / 输出 {transfer.output_addresses.length}</span>
+                <span title={transfer.txid}>{shortText(transfer.txid, 16)}</span>
+                <span>{transfer.match_count ? `新闻命中 ${transfer.match_count}` : "未命中新闻"}</span>
+                <em>{expanded ? "收起" : "详情"}</em>
+              </button>
+              {expanded && (
+                <div className="btc-transfer-table__detail">
+                  <BtcTransferDetail
+                    transfer={detail}
+                    canAdmin={canAdmin}
+                    confirming={confirmAddress.isPending}
+                    subscribedAddresses={subscribedAddresses}
+                    onConfirm={subscribeAddress}
+                  />
+                </div>
+              )}
+            </div>
+          );
+        })}
+        {!transfers.length && fallbackOperations.map((operation) => {
+          const txid = String(operation.txid ?? "");
+          const expanded = selectedTxid === txid;
+          return (
+            <div className="btc-transfer-table__item" key={`${operation.address}-${operation.txid}-${operation.direction}`}>
+              <button
+                className={expanded ? "btc-transfer-table__row active" : "btc-transfer-table__row"}
+                onClick={() => setSelectedTxid(expanded ? "" : txid)}
+              >
+                <strong>{formatNumber(operation.amount_btc, 4)} BTC</strong>
+                <span>{cnDateFromAny(operation.timestamp ?? operation.timestamp_ms)}</span>
+                <span>{shortText(operation.address, 12)}</span>
+                <span>{String(operation.behavior ?? operation.direction ?? "--")}</span>
+                <span title={txid}>{shortText(txid, 16)}</span>
+                <span>净额 {formatNumber(operation.net_btc, 4)} BTC</span>
+                <em>{expanded ? "收起" : "详情"}</em>
+              </button>
+              {expanded && (
+                <div className="btc-transfer-table__detail">
+                  <BtcAddressOperationDetail operation={operation} />
+                </div>
+              )}
+            </div>
+          );
+        })}
+        {transfersQuery.isLoading && <span className="empty">正在加载链上大额底表…</span>}
+        {!transfersQuery.isLoading && !transfers.length && !fallbackOperations.length && <span className="empty">暂无大额交易记录。启用巨鲸策略后，系统会按区块增量采集超过阈值的 BTC/ETH 已确认交易。</span>}
+      </div>
+    </Panel>
+  );
+}
+
+function transferAsset(transfer: Partial<BtcLargeTransfer> | Record<string, any>) {
+  return String(transfer.asset ?? "BTC").toUpperCase();
+}
+
+function transferAmount(transfer: Partial<BtcLargeTransfer> | Record<string, any>) {
+  const value = Number(transfer.amount ?? 0);
+  if (Number.isFinite(value) && value > 0) return value;
+  return Number(transfer.amount_btc ?? 0);
+}
+
+function transferAmountText(transfer: Partial<BtcLargeTransfer> | Record<string, any>, digits = 4) {
+  return `${formatNumber(transferAmount(transfer), digits)} ${transferAsset(transfer)}`;
+}
+
+function transferExplorerLabel(transfer: Partial<BtcLargeTransfer> | Record<string, any>) {
+  const chain = String(transfer.chain ?? "").toLowerCase();
+  return chain === "eth" ? "Etherscan" : "Blockstream";
+}
+
+function addressItemValue(item: Record<string, any>, asset: string) {
+  const exact = Number(item[`value_${asset.toLowerCase()}`] ?? 0);
+  if (Number.isFinite(exact) && exact > 0) return exact;
+  const generic = Number(item.value ?? item.amount ?? 0);
+  if (Number.isFinite(generic) && generic > 0) return generic;
+  return Number(item.value_btc ?? 0);
+}
+
+function BtcAddressOperationDetail({ operation }: { operation: Record<string, any> }) {
+  return (
+    <div className="btc-transfer-detail__inner">
+      <div className="btc-transfer-detail__head">
+        <strong>{formatNumber(operation.amount_btc, 4)} BTC</strong>
+        {operation.source_url && <a href={String(operation.source_url)} target="_blank" rel="noreferrer">Blockstream</a>}
+      </div>
+      <small>{String(operation.txid ?? "--")}</small>
+      <div className="btc-address-detail-grid">
+        <Metric label="地址" value={shortText(operation.address, 12)} />
+        <Metric label="方向" value={String(operation.behavior ?? operation.direction ?? "--")} />
+        <Metric label="净额" value={`${formatNumber(operation.net_btc, 4)} BTC`} />
+        <Metric label="时间" value={cnDateFromAny(operation.timestamp ?? operation.timestamp_ms)} />
+        <Metric label="确认状态" value={operation.confirmed ? "已确认" : "未确认"} />
+        <Metric label="对手方" value={btcCounterpartyText(operation) || "--"} />
+      </div>
+      <BtcAddressOperationRow operation={operation} />
+    </div>
+  );
+}
+
+function BtcTransferDetail({
+  transfer,
+  canAdmin,
+  confirming,
+  subscribedAddresses,
+  onConfirm
+}: {
+  transfer: BtcLargeTransfer;
+  canAdmin: boolean;
+  confirming: boolean;
+  subscribedAddresses: ReadonlySet<string>;
+  onConfirm: (address: string, role: "candidate" | "confirmed") => void;
+}) {
+  const topInputs = transfer.input_addresses.slice(0, 8);
+  const topOutputs = transfer.output_addresses.slice(0, 8);
+  const asset = transferAsset(transfer);
+  const canSubscribeBtc = canAdmin && asset === "BTC";
+  const subscribeButtonText = (address: string) => subscribedAddresses.has(normalizeAddress(address)) ? "已订阅" : "订阅监控";
+  return (
+    <div className="btc-transfer-detail__inner">
+      <div className="btc-transfer-detail__head">
+        <strong>{transferAmountText(transfer)}</strong>
+        <a href={transfer.source_url} target="_blank" rel="noreferrer">{transferExplorerLabel(transfer)}</a>
+      </div>
+      <small>{transfer.txid}</small>
+      <p className="btc-transfer-detail__hint">输入地址是这笔交易的资金来源，输出地址是接收方或找零地址。BTC 地址可加入 IBIT 地址簇持续监控；ETH 地址当前进入链上大额底表和新闻匹配，暂不混用 BTC 地址订阅接口。</p>
+      <div className="btc-address-columns">
+        <section>
+          <b>输入地址</b>
+          {topInputs.map((item) => (
+            <div className="btc-address-row" key={String(item.address)}>
+              <span className="btc-address-row__value">{String(item.address)} · {formatNumber(addressItemValue(item, asset), 4)} {asset}</span>
+              {canSubscribeBtc && (
+                <span className="btc-address-row__actions">
+                  <button disabled={confirming} onClick={() => onConfirm(String(item.address), "confirmed")}>{subscribeButtonText(String(item.address))}</button>
+                </span>
+              )}
+            </div>
+          ))}
+          {!topInputs.length && <span className="empty">暂无输入地址</span>}
+        </section>
+        <section>
+          <b>输出地址</b>
+          {topOutputs.map((item) => (
+            <div className="btc-address-row" key={String(item.address)}>
+              <span className="btc-address-row__value">{String(item.address)} · {formatNumber(addressItemValue(item, asset), 4)} {asset}</span>
+              {canSubscribeBtc && (
+                <span className="btc-address-row__actions">
+                  <button disabled={confirming} onClick={() => onConfirm(String(item.address), "confirmed")}>{subscribeButtonText(String(item.address))}</button>
+                </span>
+              )}
+            </div>
+          ))}
+          {!topOutputs.length && <span className="empty">暂无输出地址</span>}
+        </section>
+      </div>
+      <div className="records compact">
+        {transfer.matches.map((match, index) => {
+          const signal = match.signal && typeof match.signal === "object" ? match.signal as Record<string, any> : {};
+          const reasons = Array.isArray(match.reasons) ? match.reasons : [];
+          return (
+            <span key={`${match.signal_id}-${index}`}>
+              新闻匹配 {formatNumber(Number(match.confidence ?? 0) * 100, 0)}% · {String(signal.title ?? "IBIT 新闻线索")} · {String(match.candidate_address ?? "")}
+              {reasons.length ? ` · ${reasons.slice(0, 3).join("；")}` : ""}
+            </span>
+          );
+        })}
+        {!transfer.matches.length && <span className="empty">这笔交易暂未命中 IBIT 新闻线索</span>}
+      </div>
     </div>
   );
 }
@@ -1659,6 +2489,11 @@ function cnDateFromAny(value: unknown) {
   return cnDate(String(value));
 }
 
+function localDateTimeToIso(value: string) {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "" : date.toISOString();
+}
+
 function whaleEventCurrentPosition(event: Record<string, any>) {
   const payload = event.payload && typeof event.payload === "object" ? event.payload : {};
   const label = typeof payload.current_position_label === "string" ? payload.current_position_label.trim() : "";
@@ -1787,14 +2622,25 @@ function AdminContent({
   const [strategies, setStrategies] = useState<MutableStrategy[]>(data.strategies as MutableStrategy[]);
   const [modules, setModules] = useState(data.modules);
   const [notifiers, setNotifiers] = useState<NotifierTarget[]>([]);
+  const strategiesRef = useRef(strategies);
+  const dirtyStrategyIdsRef = useRef<Set<string>>(new Set());
   const chartModuleIndex = modules.findIndex((module) => module.id === "charts");
   const chartModule = chartModuleIndex >= 0 ? modules[chartModuleIndex] : undefined;
 
   useEffect(() => {
     setSymbols(data.symbols);
-    setStrategies(data.strategies as MutableStrategy[]);
+    setStrategies((current) => {
+      if (!dirtyStrategyIdsRef.current.size) return data.strategies as MutableStrategy[];
+      const currentById = new Map(current.map((strategy) => [strategy.id, strategy]));
+      return (data.strategies as MutableStrategy[]).map((strategy) => (
+        dirtyStrategyIdsRef.current.has(strategy.id) ? currentById.get(strategy.id) ?? strategy : strategy
+      ));
+    });
     setModules(data.modules);
   }, [data]);
+  useEffect(() => {
+    strategiesRef.current = strategies;
+  }, [strategies]);
 
   const saveSymbols = useMutation({
     mutationFn: api.saveSymbols,
@@ -1803,7 +2649,11 @@ function AdminContent({
   });
   const saveStrategy = useMutation({
     mutationFn: api.saveStrategy,
-    onSuccess: () => done(queryClient, setNotice, "策略已保存"),
+    onSuccess: (saved) => {
+      dirtyStrategyIdsRef.current.delete(saved.id);
+      setStrategies((current) => current.map((strategy) => strategy.id === saved.id ? saved as MutableStrategy : strategy));
+      done(queryClient, setNotice, "策略已保存");
+    },
     onError: (error) => setNotice(`策略保存失败：${readErrorMessage(error)}`)
   });
   const saveModules = useMutation({
@@ -1812,6 +2662,13 @@ function AdminContent({
     onError: (error) => setNotice(`模块显示保存失败：${readErrorMessage(error)}`)
   });
   const notifiersQuery = useQuery({ queryKey: ["notifiers"], queryFn: api.notifiers });
+  const notifierWhalesQuery = useQuery({ queryKey: ["whales"], queryFn: api.whales });
+  const notifierWhaleTargets = notifierWhalesQuery.data ?? [];
+  const boundWhaleNotifierId = String(strategies.find((strategy) => strategy.id === "whale")?.notifier_id ?? "").trim();
+  const boundWhaleNotifier = boundWhaleNotifierId ? notifiers.find((notifier) => notifier.id === boundWhaleNotifierId) : undefined;
+  const boundWhaleNotifierLabel = boundWhaleNotifierId
+    ? `${boundWhaleNotifier?.name || boundWhaleNotifierId} (${boundWhaleNotifierId})`
+    : "";
   const syncSavedNotifiers = (items: NotifierTarget[]) => {
     setNotifiers(items);
     queryClient.invalidateQueries({ queryKey: ["snapshot"] });
@@ -1905,14 +2762,22 @@ function AdminContent({
                   <strong>{group.title}</strong>
                   <span>{groupStrategies.length} 项</span>
                 </div>
-                <div className="strategy-editors">
+                <div className={group.whaleTargets ? "strategy-editors strategy-editors--whale" : "strategy-editors"}>
                   {groupStrategies.map(({ strategy, index }) => (
                     <StrategyEditor
                       key={strategy.id}
                       strategy={strategy}
                       notifiers={notifiers}
-                      onChange={(next) => updateArray(strategies, setStrategies, index, next)}
-                      onSave={() => saveStrategy.mutate(strategy)}
+                      whaleTargets={notifierWhaleTargets}
+                      setNotice={setNotice}
+                      onChange={(next) => {
+                        dirtyStrategyIdsRef.current.add(next.id);
+                        updateArray(strategies, setStrategies, index, next);
+                      }}
+                      onSave={() => {
+                        const latest = strategiesRef.current[index] ?? strategy;
+                        saveStrategy.mutate(latest);
+                      }}
                       disabled={false}
                     />
                   ))}
@@ -1957,8 +2822,21 @@ function AdminContent({
                 placeholder={notifier.type === "feishu" ? "Webhook URL" : "Bot Token"}
               />
               {notifier.type === "telegram" && <input value={notifier.secrets.chat_id ?? ""} onChange={(event) => updateArray(notifiers, setNotifiers, index, { secrets: { ...notifier.secrets, chat_id: event.target.value } })} placeholder="Chat ID" />}
-              <button disabled={saveNotifiers.isPending || testNotifier.isPending || !notifier.id.trim()} onClick={() => testNotifierWithCurrentConfig(notifier)}><TestTube2 size={16} /> 测试</button>
-              <button className="danger-button" onClick={() => setNotifiers(notifiers.filter((_, itemIndex) => itemIndex !== index))}><Trash2 size={16} /> 删除</button>
+              <div className="notifier-row__actions">
+                <button disabled={saveNotifiers.isPending || testNotifier.isPending || !notifier.id.trim()} onClick={() => testNotifierWithCurrentConfig(notifier)}><TestTube2 size={16} /> 测试</button>
+                <button className="danger-button" onClick={() => setNotifiers(notifiers.filter((_, itemIndex) => itemIndex !== index))}><Trash2 size={16} /> 删除</button>
+              </div>
+              {notifier.type === "feishu" && (
+                <NotifierWhaleTargetPicker
+                  targets={notifierWhaleTargets}
+                  value={arr(notifier.config?.whale_target_ids)}
+                  btcValue={arr(notifier.config?.whale_btc_addresses)}
+                  isWhaleBound={notifier.id.trim() !== "" && notifier.id.trim() === boundWhaleNotifierId}
+                  boundNotifierLabel={boundWhaleNotifierLabel}
+                  onChange={(whale_target_ids) => updateArray(notifiers, setNotifiers, index, { config: { ...(notifier.config ?? {}), whale_target_ids } })}
+                  onBtcChange={(whale_btc_addresses) => updateArray(notifiers, setNotifiers, index, { config: { ...(notifier.config ?? {}), whale_btc_addresses } })}
+                />
+              )}
             </div>
           ))}
           {!notifiers.length && <span className="empty">暂无机器人，点击新增后填写 Webhook。</span>}
@@ -1976,6 +2854,123 @@ function AdminContent({
           ))}
         </div>
       </Panel>
+    </div>
+  );
+}
+
+function NotifierWhaleTargetPicker({
+  targets,
+  value,
+  btcValue,
+  isWhaleBound,
+  boundNotifierLabel,
+  onChange,
+  onBtcChange
+}: {
+  targets: WhaleTarget[];
+  value: string[];
+  btcValue: string[];
+  isWhaleBound: boolean;
+  boundNotifierLabel: string;
+  onChange: (value: string[]) => void;
+  onBtcChange: (value: string[]) => void;
+}) {
+  const [filter, setFilter] = useState("");
+  const selected = new Set(value);
+  const selectedBtc = new Set(btcValue.map((item) => item.toLowerCase()));
+  const labelsByAddress = new Map<string, string>();
+  targets.forEach((target) => {
+    const labels = target.config?.btc_address_labels && typeof target.config.btc_address_labels === "object" ? target.config.btc_address_labels as Record<string, any> : {};
+    configuredBtcAddresses(target).forEach((address) => labelsByAddress.set(address.toLowerCase(), `${btcAddressLabel(address, labels, target.label)} · ${shortText(address, 8)}`));
+  });
+  const selectedTargetLabels = targets.filter((target) => selected.has(target.id)).map((target) => target.label);
+  const selectedBtcLabels = btcValue.map((address) => labelsByAddress.get(address.toLowerCase()) ?? shortText(address, 8));
+  const selectedCount = selectedTargetLabels.length + selectedBtcLabels.length;
+  const summary = selectedTargetLabels.length || selectedBtcLabels.length
+    ? [...selectedTargetLabels, ...selectedBtcLabels].slice(0, 3).join("，") + (selectedTargetLabels.length + selectedBtcLabels.length > 3 ? ` 等 ${selectedTargetLabels.length + selectedBtcLabels.length} 项` : "")
+    : "全部账户";
+  const statusText = isWhaleBound
+    ? (selectedCount ? "已绑定到巨鲸/IBIT策略，按当前账户范围发送提醒。" : "已绑定到巨鲸/IBIT策略，未选择账户时会接收全部巨鲸/IBIT提醒。")
+    : (boundNotifierLabel ? `未绑定到巨鲸/IBIT策略，不会接收提醒；当前绑定机器人是 ${boundNotifierLabel}。` : "未绑定到巨鲸/IBIT策略，不会接收巨鲸/IBIT提醒。");
+  const filterText = filter.trim().toLowerCase();
+  const visibleTargets = targets.filter((target) => {
+    if (!filterText) return true;
+    const btcAddresses = configuredBtcAddresses(target);
+    const labelText = `${target.label} ${target.id} ${target.address_or_subject} ${btcAddresses.join(" ")}`.toLowerCase();
+    return labelText.includes(filterText);
+  });
+  const toggle = (id: string) => {
+    if (selected.has(id)) {
+      onChange(value.filter((item) => item !== id));
+      return;
+    }
+    onChange([...value, id]);
+  };
+  const toggleBtc = (address: string) => {
+    const key = address.toLowerCase();
+    if (selectedBtc.has(key)) {
+      onBtcChange(btcValue.filter((item) => item.toLowerCase() !== key));
+      return;
+    }
+    onBtcChange([...btcValue, address]);
+  };
+  return (
+    <div className={`notifier-target-filter ${isWhaleBound ? "notifier-target-filter--active" : "notifier-target-filter--inactive"}`}>
+      <div className="notifier-target-filter__label">
+        <span>巨鲸/IBIT提醒账户</span>
+        <small>
+          {isWhaleBound
+            ? (value.length || btcValue.length ? `${value.length} 个账户 / ${btcValue.length} 条 BTC 链` : "未选择时接收全部")
+            : (value.length || btcValue.length ? "已配置范围，绑定后生效" : "未绑定时不接收")}
+        </small>
+      </div>
+      <div className={`notifier-scope-state ${isWhaleBound ? "notifier-scope-state--active" : "notifier-scope-state--inactive"}`}>
+        <span>{isWhaleBound ? "生效中" : "未绑定"}</span>
+        <small>{statusText}</small>
+      </div>
+      <details className="notifier-scope-select">
+        <summary>
+          <span>{summary}</span>
+          <em>配置范围</em>
+        </summary>
+        <div className="notifier-scope-panel">
+          <div className="notifier-scope-toolbar">
+            <input value={filter} onChange={(event) => setFilter(event.target.value)} placeholder="搜索账户或 BTC 地址" />
+            <button type="button" onClick={() => { onChange([]); onBtcChange([]); }}>接收全部</button>
+          </div>
+          <div className="notifier-scope-list">
+            {visibleTargets.map((target) => {
+              const btcAddresses = configuredBtcAddresses(target);
+              const labels = target.config?.btc_address_labels && typeof target.config.btc_address_labels === "object" ? target.config.btc_address_labels as Record<string, any> : {};
+              const targetSelected = selected.has(target.id);
+              return (
+                <div className="notifier-scope-item" key={target.id}>
+                  <label className="notifier-scope-item__main">
+                    <input type="checkbox" checked={targetSelected} onChange={() => toggle(target.id)} />
+                    <span>
+                      <strong>{target.label}</strong>
+                      <small>{isBlackRockTarget(target) ? "IBIT 免费监控" : shortText(target.address_or_subject, 12)}</small>
+                    </span>
+                  </label>
+                  {isBlackRockTarget(target) && (
+                    <div className="notifier-scope-btc-list">
+                      {btcAddresses.map((address) => (
+                        <label key={address}>
+                          <input type="checkbox" checked={selectedBtc.has(address.toLowerCase())} onChange={() => toggleBtc(address)} />
+                          <span>{btcAddressLabel(address, labels, target.label)}</span>
+                          <small>{shortText(address, 12)}</small>
+                        </label>
+                      ))}
+                      {!btcAddresses.length && <small className="empty">暂无已订阅 BTC 地址；先到 IBIT 地址管理里添加。</small>}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+            {!visibleTargets.length && <span className="empty">{targets.length ? "没有匹配的账户" : "暂无关注对象"}</span>}
+          </div>
+        </div>
+      </details>
     </div>
   );
 }
@@ -2069,18 +3064,24 @@ function WhaleTargetManager({ setNotice, embedded = false }: { setNotice: (notic
           </div>
         )}
         <div className="target-list">
-          {drafts.map((target, index) => (
-            <div className="whale-target-row" key={`${target.id ?? "new"}-${index}`}>
+          {drafts.map((target, index) => {
+            const isBlackRockFree = String(target.config.provider ?? "") === "blackrock_free_monitor";
+            if (isBlackRockFree) return null;
+            return (
+            <div className={`whale-target-row ${isBlackRockFree ? "whale-target-row--ibit" : ""}`} key={`${target.id ?? "new"}-${index}`}>
               <Switch checked={target.enabled} onChange={(enabled) => updateArray(drafts, setDrafts, index, { enabled })} />
               <input value={target.label} onChange={(event) => updateArray(drafts, setDrafts, index, { label: event.target.value })} placeholder="名称，例如 麻吉大哥" />
               <input value={target.address_or_subject} onChange={(event) => updateArray(drafts, setDrafts, index, { address_or_subject: event.target.value })} placeholder="主地址（必填）" />
               <WhaleTagSelector value={whaleTags(target.config.tags)} onChange={(tags) => updateArray(drafts, setDrafts, index, { config: { ...target.config, tags } })} />
               <input value={String(target.config.source_url ?? "")} onChange={(event) => updateArray(drafts, setDrafts, index, { config: { ...target.config, source_url: event.target.value } })} placeholder="来源链接（选填，不影响监控）" />
-              <button disabled={saveTarget.isPending || !target.label.trim() || !target.address_or_subject.trim()} onClick={() => saveTarget.mutate(target)}><Save size={16} /> 保存</button>
-              <button className="danger-button" disabled={deleteTarget.isPending} onClick={() => removeTarget(target, index)}><Trash2 size={16} /> 删除</button>
+              <div className="whale-target-row__actions">
+                <button disabled={saveTarget.isPending || !target.label.trim() || !target.address_or_subject.trim()} onClick={() => saveTarget.mutate(target)}><Save size={16} /> 保存</button>
+                <button className="danger-button" disabled={deleteTarget.isPending} onClick={() => removeTarget(target, index)}><Trash2 size={16} /> 删除</button>
+              </div>
             </div>
-          ))}
-          {!drafts.length && <span className="empty">暂无关注对象。先解析地址或点击新增。</span>}
+            );
+          })}
+          {!drafts.some((target) => String(target.config.provider ?? "") !== "blackrock_free_monitor") && <span className="empty">暂无普通巨鲸关注对象。IBIT 地址请在右侧 IBIT 免费监控里管理。</span>}
         </div>
       </div>
   );
@@ -2112,12 +3113,16 @@ function WhaleTargetManager({ setNotice, embedded = false }: { setNotice: (notic
 function StrategyEditor({
   strategy,
   notifiers,
+  whaleTargets,
+  setNotice,
   onChange,
   onSave,
   disabled
 }: {
   strategy: MutableStrategy;
   notifiers: NotifierTarget[];
+  whaleTargets: WhaleTarget[];
+  setNotice: (notice: string) => void;
   onChange: (strategy: MutableStrategy) => void;
   onSave: () => void;
   disabled: boolean;
@@ -2142,6 +3147,19 @@ function StrategyEditor({
       enable_truth_social: mode === "rss" || mode === "both"
     });
   };
+  if (strategy.id === "whale") {
+    return (
+      <WhaleStrategyEditor
+        strategy={strategy}
+        notifiers={notifiers}
+        whaleTargets={whaleTargets}
+        setNotice={setNotice}
+        onChange={onChange}
+        onSave={onSave}
+        disabled={disabled}
+      />
+    );
+  }
   return (
     <div className="strategy-editor">
       <div className="strategy-editor__head">
@@ -2223,6 +3241,37 @@ function StrategyEditor({
             <Switch checked={Boolean(config.debank_enabled)} onChange={(debank_enabled) => setConfig({ debank_enabled })} label="DeBank 多链资产" />
             <TextField label="DeBank API" value={String(config.debank_base_url ?? "https://pro-openapi.debank.com")} onChange={(debank_base_url) => setConfig({ debank_base_url })} />
             <TextField label="DeBank AccessKey" value={String(config.debank_access_key ?? "")} onChange={(debank_access_key) => setConfig({ debank_access_key })} />
+            <Switch checked={Boolean(config.etherscan_enabled)} onChange={(etherscan_enabled) => setConfig({ etherscan_enabled })} label="Etherscan ETH底表" />
+            <TextField label="Etherscan API" value={String(config.etherscan_api_url ?? "https://api.etherscan.io/v2/api")} onChange={(etherscan_api_url) => setConfig({ etherscan_api_url })} />
+            <TextField label="Etherscan API Key" value={String(config.etherscan_api_key ?? "")} onChange={(etherscan_api_key) => setConfig({ etherscan_api_key })} />
+            <TextField label="Etherscan Chain ID" value={String(config.etherscan_chain_id ?? "1")} onChange={(etherscan_chain_id) => setConfig({ etherscan_chain_id })} />
+            <Switch checked={Boolean(config.blackrock_free_enabled ?? true)} onChange={(blackrock_free_enabled) => setConfig({ blackrock_free_enabled })} label="IBIT 免费监控" />
+            <Switch checked={ibitNotificationEnabled(config, "blackrock_btc_address_operation_notification_enabled")} onChange={(blackrock_btc_address_operation_notification_enabled) => setConfig({ blackrock_btc_address_operation_notification_enabled })} label="BTC链上地址操作提醒" />
+            <Switch checked={ibitNotificationEnabled(config, "blackrock_btc_outflow_notification_enabled")} onChange={(blackrock_btc_outflow_notification_enabled) => setConfig({ blackrock_btc_outflow_notification_enabled })} label="BTC地址簇大额转出提醒" />
+            <Switch checked={ibitNotificationEnabled(config, "ibit_news_candidate_notification_enabled")} onChange={(ibit_news_candidate_notification_enabled) => setConfig({ ibit_news_candidate_notification_enabled })} label="新闻线索匹配提醒" />
+            <Switch checked={ibitNotificationEnabled(config, "blackrock_etf_flow_notification_enabled")} onChange={(blackrock_etf_flow_notification_enabled) => setConfig({ blackrock_etf_flow_notification_enabled })} label="ETF资金流提醒" />
+            <TextField label="iShares IBIT 页面" value={String(config.blackrock_ishares_url ?? "https://www.ishares.com/us/products/333011/ishares-bitcoin-trust-etf")} onChange={(blackrock_ishares_url) => setConfig({ blackrock_ishares_url })} />
+            <TextField label="Farside ETF资金流" value={String(config.blackrock_farside_url ?? "https://farside.co.uk/btc/")} onChange={(blackrock_farside_url) => setConfig({ blackrock_farside_url })} />
+            <TextField label="BTC Explorer API" value={String(config.blackrock_blockstream_api ?? "https://blockstream.info/api")} onChange={(blackrock_blockstream_api) => setConfig({ blackrock_blockstream_api })} />
+            <NumberField label="IBIT ETF净流入提醒美元" value={config.blackrock_flow_alert_min_usd ?? 50000000} onChange={(blackrock_flow_alert_min_usd) => setConfig({ blackrock_flow_alert_min_usd })} />
+            <NumberField label="BTC地址簇转出阈值" value={config.blackrock_btc_transfer_min_btc ?? 1000} onChange={(blackrock_btc_transfer_min_btc) => setConfig({ blackrock_btc_transfer_min_btc })} />
+            <NumberField label="BTC地址簇回看小时" value={config.blackrock_btc_lookback_hours ?? 24} onChange={(blackrock_btc_lookback_hours) => setConfig({ blackrock_btc_lookback_hours: Math.max(1, blackrock_btc_lookback_hours) })} />
+            <Switch checked={Boolean(config.ibit_news_enabled)} onChange={(ibit_news_enabled) => setConfig({ ibit_news_enabled })} label="IBIT 新闻线索" />
+            <TextField label="IBIT新闻RSS" value={arr(config.ibit_news_rss_urls).join(",")} onChange={(value) => setConfig({ ibit_news_rss_urls: split(value) })} />
+            <TextField label="IBIT新闻关键词" value={arr(config.ibit_news_keywords).join(",")} onChange={(value) => setConfig({ ibit_news_keywords: split(value) })} />
+            <NumberField label="新闻回看小时" value={config.ibit_news_lookback_hours ?? 72} onChange={(ibit_news_lookback_hours) => setConfig({ ibit_news_lookback_hours: Math.max(1, ibit_news_lookback_hours) })} />
+            <NumberField label="新闻最大条数" value={config.ibit_news_max_items ?? 60} onChange={(ibit_news_max_items) => setConfig({ ibit_news_max_items: Math.max(1, ibit_news_max_items) })} />
+            <NumberField label="新闻提醒置信度" value={config.ibit_news_candidate_notify_min_confidence ?? 0.6} step="0.05" onChange={(ibit_news_candidate_notify_min_confidence) => setConfig({ ibit_news_candidate_notify_min_confidence })} />
+            <Switch checked={Boolean(config.btc_candidate_monitor_enabled ?? true)} onChange={(btc_candidate_monitor_enabled) => setConfig({ btc_candidate_monitor_enabled })} label="BTC 大额底表" />
+            <Switch checked={Boolean(config.eth_candidate_monitor_enabled ?? true)} onChange={(eth_candidate_monitor_enabled) => setConfig({ eth_candidate_monitor_enabled })} label="ETH 大额底表" />
+            <NumberField label="底表最小 BTC" value={config.btc_candidate_min_btc ?? 500} onChange={(btc_candidate_min_btc) => setConfig({ btc_candidate_min_btc: Math.max(1, btc_candidate_min_btc) })} />
+            <NumberField label="底表最小 ETH" value={config.eth_candidate_min_eth ?? 5000} onChange={(eth_candidate_min_eth) => setConfig({ eth_candidate_min_eth: Math.max(1, eth_candidate_min_eth) })} />
+            <NumberField label="首次补扫区块" value={config.btc_candidate_backfill_blocks ?? 3} onChange={(btc_candidate_backfill_blocks) => setConfig({ btc_candidate_backfill_blocks: Math.max(1, btc_candidate_backfill_blocks) })} />
+            <NumberField label="每轮扫描区块" value={config.btc_candidate_scan_blocks_per_run ?? 1} onChange={(btc_candidate_scan_blocks_per_run) => setConfig({ btc_candidate_scan_blocks_per_run: Math.max(1, btc_candidate_scan_blocks_per_run) })} />
+            <NumberField label="ETH新闻回扫块/线索" value={config.eth_candidate_history_blocks_per_news ?? 1440} onChange={(eth_candidate_history_blocks_per_news) => setConfig({ eth_candidate_history_blocks_per_news: Math.max(1, eth_candidate_history_blocks_per_news) })} />
+            <NumberField label="底表保留天数" value={config.btc_candidate_retention_days ?? 90} onChange={(btc_candidate_retention_days) => setConfig({ btc_candidate_retention_days: Math.max(1, btc_candidate_retention_days) })} />
+            <NumberField label="底表匹配窗口小时" value={config.btc_candidate_match_window_hours ?? 48} onChange={(btc_candidate_match_window_hours) => setConfig({ btc_candidate_match_window_hours: Math.max(1, btc_candidate_match_window_hours) })} />
+            <NumberField label="金额容差 %" value={config.btc_candidate_amount_tolerance_pct ?? 8} onChange={(btc_candidate_amount_tolerance_pct) => setConfig({ btc_candidate_amount_tolerance_pct: Math.max(1, btc_candidate_amount_tolerance_pct) })} />
             <NumberField label="主轮询秒" value={config.poll_seconds ?? 300} onChange={(poll_seconds) => setConfig({ poll_seconds: Math.max(300, poll_seconds) })} />
             <Switch checked={Boolean(config.trade_monitor_enabled ?? true)} onChange={(trade_monitor_enabled) => setConfig({ trade_monitor_enabled })} label="成交监控" />
             <Switch checked={Boolean(config.trade_notification_enabled ?? true)} onChange={(trade_notification_enabled) => setConfig({ trade_notification_enabled })} label="成交机器人提醒" />
@@ -2259,6 +3308,382 @@ function StrategyEditor({
         )}
         <button onClick={onSave} disabled={disabled}><Save size={16} /> 保存</button>
       </div>
+    </div>
+  );
+}
+
+function WhaleStrategyEditor({
+  strategy,
+  notifiers,
+  whaleTargets,
+  setNotice,
+  onChange,
+  onSave,
+  disabled
+}: {
+  strategy: MutableStrategy;
+  notifiers: NotifierTarget[];
+  whaleTargets: WhaleTarget[];
+  setNotice: (notice: string) => void;
+  onChange: (strategy: MutableStrategy) => void;
+  onSave: () => void;
+  disabled: boolean;
+}) {
+  const config = strategy.config;
+  const setConfig = (patch: Record<string, unknown>) => onChange({ ...strategy, config: { ...config, ...patch } });
+  return (
+    <div className="strategy-editor strategy-editor--whale">
+      <div className="strategy-editor__head">
+        <strong>{strategyLabels[strategy.id] ?? strategy.name}</strong>
+        <Switch checked={strategy.enabled} onChange={(enabled) => onChange({ ...strategy, enabled })} />
+      </div>
+      <div className="whale-strategy-layout">
+        <section className="whale-strategy-card">
+          <div className="whale-strategy-card__head">
+            <strong>巨鲸通用</strong>
+            <span>0x / Hyperliquid / DeBank</span>
+          </div>
+          <div className="form-grid">
+            <Switch checked={Boolean(config.enabled)} onChange={(enabled) => setConfig({ enabled })} label="启用巨鲸 worker" />
+            <Switch checked={Boolean(config.hyperliquid_enabled ?? true)} onChange={(hyperliquid_enabled) => setConfig({ hyperliquid_enabled })} label="Hyperliquid 合约" />
+            <TextField label="Hyperliquid API" value={String(config.hyperliquid_base_url ?? "https://api.hyperliquid.xyz")} onChange={(hyperliquid_base_url) => setConfig({ hyperliquid_base_url })} />
+            <Switch checked={Boolean(config.debank_enabled)} onChange={(debank_enabled) => setConfig({ debank_enabled })} label="DeBank 多链资产" />
+            <TextField label="DeBank API" value={String(config.debank_base_url ?? "https://pro-openapi.debank.com")} onChange={(debank_base_url) => setConfig({ debank_base_url })} />
+            <TextField label="DeBank AccessKey" value={String(config.debank_access_key ?? "")} onChange={(debank_access_key) => setConfig({ debank_access_key })} />
+            <NumberField label="主轮询秒" value={config.poll_seconds ?? 300} onChange={(poll_seconds) => setConfig({ poll_seconds: Math.max(300, poll_seconds) })} />
+            <Switch checked={Boolean(config.trade_monitor_enabled ?? true)} onChange={(trade_monitor_enabled) => setConfig({ trade_monitor_enabled })} label="成交监控" />
+            <Switch checked={Boolean(config.trade_notification_enabled ?? true)} onChange={(trade_notification_enabled) => setConfig({ trade_notification_enabled })} label="成交机器人提醒" />
+            <NumberField label="成交轮询秒" value={config.trade_poll_seconds ?? 120} onChange={(trade_poll_seconds) => setConfig({ trade_poll_seconds: Math.max(120, trade_poll_seconds) })} />
+            <NumberField label="扩展信息轮询秒" value={config.extended_poll_seconds ?? 1800} onChange={(extended_poll_seconds) => setConfig({ extended_poll_seconds: Math.max(1800, extended_poll_seconds) })} />
+            <NumberField label="前台大额美元阈值" value={config.trade_min_notional_usd ?? 100000} onChange={(trade_min_notional_usd) => setConfig({ trade_min_notional_usd })} />
+            <NumberField label="ETH 数量阈值" value={tradeCoinThreshold(config, "ETH", 100)} onChange={(value) => setConfig({ trade_coin_thresholds: { ...tradeCoinThresholds(config), ETH: value } })} />
+            <NumberField label="BTC 数量阈值" value={tradeCoinThreshold(config, "BTC", 5)} onChange={(value) => setConfig({ trade_coin_thresholds: { ...tradeCoinThresholds(config), BTC: value } })} />
+            <NumberField label="SOL 数量阈值" value={tradeCoinThreshold(config, "SOL", 10000)} onChange={(value) => setConfig({ trade_coin_thresholds: { ...tradeCoinThresholds(config), SOL: value } })} />
+            <SelectField
+              label="首次成交同步"
+              value={String(config.initial_fill_sync_mode ?? "cursor_only")}
+              options={[
+                { value: "cursor_only", label: "只记录游标" },
+                { value: "lookback_3h", label: "回看 3 小时" },
+                { value: "today", label: "今天全量" }
+              ]}
+              onChange={(initial_fill_sync_mode) => setConfig({ initial_fill_sync_mode })}
+            />
+            <NumberField label="仓位变化告警 %" value={config.position_change_alert_pct ?? 25} onChange={(position_change_alert_pct) => setConfig({ position_change_alert_pct })} />
+            <NumberField label="最小仓位美元" value={config.min_position_value_usd ?? 10000} onChange={(min_position_value_usd) => setConfig({ min_position_value_usd })} />
+            <NumberField label="强平距离 %" value={config.liquidation_distance_pct ?? 5} onChange={(liquidation_distance_pct) => setConfig({ liquidation_distance_pct })} />
+          </div>
+          <div className="field-help-list">
+            <span><b>常改</b>：启用状态、Hyperliquid/DeBank 开关、阈值。</span>
+            <span><b>少改</b>：API 地址、轮询秒。除非接口变更或限频，不建议动。</span>
+            <span><b>提醒</b>：巨鲸成交只要关注对象有新操作就提醒，阈值只影响前台“大额”标记。</span>
+          </div>
+        </section>
+        <section className="whale-strategy-card whale-strategy-card--ibit">
+          <IbitStrategySettings strategy={strategy} config={config} setConfig={setConfig} setNotice={setNotice} notifiers={notifiers} whaleTargets={whaleTargets} onSaveStrategy={onSave} />
+        </section>
+      </div>
+      <div className="strategy-editor__footer">
+        <select value={strategy.notifier_id ?? ""} onChange={(event) => onChange({ ...strategy, notifier_id: event.target.value || null })}>
+          <option value="">不绑定机器人</option>
+          {notifiers.map((notifier) => <option value={notifier.id} key={notifier.id}>{notifier.name}</option>)}
+        </select>
+        <button onClick={onSave} disabled={disabled}><Save size={16} /> 保存</button>
+      </div>
+    </div>
+  );
+}
+
+function IbitStrategySettings({
+  strategy,
+  config,
+  setConfig,
+  setNotice,
+  notifiers,
+  whaleTargets,
+  onSaveStrategy
+}: {
+  strategy: MutableStrategy;
+  config: Record<string, any>;
+  setConfig: (patch: Record<string, unknown>) => void;
+  setNotice: (notice: string) => void;
+  notifiers: NotifierTarget[];
+  whaleTargets: WhaleTarget[];
+  onSaveStrategy: () => void;
+}) {
+  return (
+    <div className="ibit-settings">
+      <div className="whale-strategy-card__head">
+        <strong>IBIT 免费监控</strong>
+        <span>BTC/ETH 链上底表 / ETF资金流 / 新闻匹配</span>
+      </div>
+      <IbitNotifierBindingStatus strategy={strategy} notifiers={notifiers} whaleTargets={whaleTargets} />
+      <div className="form-grid">
+        <Switch checked={Boolean(config.blackrock_free_enabled ?? true)} onChange={(blackrock_free_enabled) => setConfig({ blackrock_free_enabled })} label="启用 IBIT" />
+        <Switch checked={ibitNotificationEnabled(config, "blackrock_btc_address_operation_notification_enabled")} onChange={(blackrock_btc_address_operation_notification_enabled) => setConfig({ blackrock_btc_address_operation_notification_enabled })} label="BTC链上地址操作提醒" />
+        <Switch checked={ibitNotificationEnabled(config, "blackrock_btc_outflow_notification_enabled")} onChange={(blackrock_btc_outflow_notification_enabled) => setConfig({ blackrock_btc_outflow_notification_enabled })} label="BTC地址簇大额转出提醒" />
+        <Switch checked={ibitNotificationEnabled(config, "ibit_news_candidate_notification_enabled")} onChange={(ibit_news_candidate_notification_enabled) => setConfig({ ibit_news_candidate_notification_enabled })} label="新闻线索匹配提醒" />
+        <Switch checked={ibitNotificationEnabled(config, "blackrock_etf_flow_notification_enabled")} onChange={(blackrock_etf_flow_notification_enabled) => setConfig({ blackrock_etf_flow_notification_enabled })} label="ETF资金流提醒" />
+        <NumberField label="ETF净流入提醒美元" value={config.blackrock_flow_alert_min_usd ?? 50000000} onChange={(blackrock_flow_alert_min_usd) => setConfig({ blackrock_flow_alert_min_usd })} />
+        <NumberField label="BTC 地址回看小时" value={config.blackrock_btc_lookback_hours ?? 24} onChange={(blackrock_btc_lookback_hours) => setConfig({ blackrock_btc_lookback_hours: Math.max(1, blackrock_btc_lookback_hours) })} />
+        <Switch checked={Boolean(config.ibit_news_enabled)} onChange={(ibit_news_enabled) => setConfig({ ibit_news_enabled })} label="IBIT 新闻线索" />
+        <TextField label="新闻 RSS" value={arr(config.ibit_news_rss_urls).join(",")} onChange={(value) => setConfig({ ibit_news_rss_urls: split(value) })} />
+        <TextField label="新闻关键词" value={arr(config.ibit_news_keywords).join(",")} onChange={(value) => setConfig({ ibit_news_keywords: split(value) })} />
+        <NumberField label="新闻回看小时" value={config.ibit_news_lookback_hours ?? 72} onChange={(ibit_news_lookback_hours) => setConfig({ ibit_news_lookback_hours: Math.max(1, ibit_news_lookback_hours) })} />
+        <NumberField label="新闻最大条数" value={config.ibit_news_max_items ?? 60} onChange={(ibit_news_max_items) => setConfig({ ibit_news_max_items: Math.max(1, ibit_news_max_items) })} />
+        <NumberField label="新闻提醒置信度" value={config.ibit_news_candidate_notify_min_confidence ?? 0.6} step="0.05" onChange={(ibit_news_candidate_notify_min_confidence) => setConfig({ ibit_news_candidate_notify_min_confidence })} />
+        <Switch checked={Boolean(config.btc_candidate_monitor_enabled ?? true)} onChange={(btc_candidate_monitor_enabled) => setConfig({ btc_candidate_monitor_enabled })} label="BTC 大额底表" />
+        <Switch checked={Boolean(config.eth_candidate_monitor_enabled ?? true)} onChange={(eth_candidate_monitor_enabled) => setConfig({ eth_candidate_monitor_enabled })} label="ETH 大额底表" />
+        <Switch checked={Boolean(config.etherscan_enabled)} onChange={(etherscan_enabled) => setConfig({ etherscan_enabled })} label="Etherscan 数据源" />
+        <NumberField label="底表最小 BTC" value={config.btc_candidate_min_btc ?? 500} onChange={(btc_candidate_min_btc) => setConfig({ btc_candidate_min_btc: Math.max(1, btc_candidate_min_btc) })} />
+        <NumberField label="底表最小 ETH" value={config.eth_candidate_min_eth ?? 5000} onChange={(eth_candidate_min_eth) => setConfig({ eth_candidate_min_eth: Math.max(1, eth_candidate_min_eth) })} />
+        <NumberField label="底表匹配窗口小时" value={config.btc_candidate_match_window_hours ?? 48} onChange={(btc_candidate_match_window_hours) => setConfig({ btc_candidate_match_window_hours: Math.max(1, btc_candidate_match_window_hours) })} />
+        <NumberField label="金额容差 %" value={config.btc_candidate_amount_tolerance_pct ?? 8} onChange={(btc_candidate_amount_tolerance_pct) => setConfig({ btc_candidate_amount_tolerance_pct: Math.max(1, btc_candidate_amount_tolerance_pct) })} />
+        <TextField label="Etherscan API Key" value={String(config.etherscan_api_key ?? "")} onChange={(etherscan_api_key) => setConfig({ etherscan_api_key })} />
+        <TextField label="Etherscan Chain ID" value={String(config.etherscan_chain_id ?? "1")} onChange={(etherscan_chain_id) => setConfig({ etherscan_chain_id })} />
+      </div>
+      <details className="advanced-settings">
+        <summary>高级源配置</summary>
+        <div className="form-grid">
+          <TextField label="iShares 页面" value={String(config.blackrock_ishares_url ?? "https://www.ishares.com/us/products/333011/ishares-bitcoin-trust-etf")} onChange={(blackrock_ishares_url) => setConfig({ blackrock_ishares_url })} />
+          <TextField label="Farside ETF资金流" value={String(config.blackrock_farside_url ?? "https://farside.co.uk/btc/")} onChange={(blackrock_farside_url) => setConfig({ blackrock_farside_url })} />
+          <TextField label="BTC Explorer API" value={String(config.blackrock_blockstream_api ?? "https://blockstream.info/api")} onChange={(blackrock_blockstream_api) => setConfig({ blackrock_blockstream_api })} />
+          <NumberField label="地址簇转出阈值" value={config.blackrock_btc_transfer_min_btc ?? 1000} onChange={(blackrock_btc_transfer_min_btc) => setConfig({ blackrock_btc_transfer_min_btc })} />
+          <NumberField label="首次补扫区块" value={config.btc_candidate_backfill_blocks ?? 3} onChange={(btc_candidate_backfill_blocks) => setConfig({ btc_candidate_backfill_blocks: Math.max(1, btc_candidate_backfill_blocks) })} />
+          <NumberField label="每轮扫描区块" value={config.btc_candidate_scan_blocks_per_run ?? 1} onChange={(btc_candidate_scan_blocks_per_run) => setConfig({ btc_candidate_scan_blocks_per_run: Math.max(1, btc_candidate_scan_blocks_per_run) })} />
+          <NumberField label="ETH每轮扫描区块" value={config.eth_candidate_scan_blocks_per_run ?? 1} onChange={(eth_candidate_scan_blocks_per_run) => setConfig({ eth_candidate_scan_blocks_per_run: Math.max(1, eth_candidate_scan_blocks_per_run) })} />
+          <NumberField label="Etherscan 请求间隔秒" value={config.etherscan_min_request_interval_seconds ?? 0.25} step="0.05" onChange={(etherscan_min_request_interval_seconds) => setConfig({ etherscan_min_request_interval_seconds: Math.max(0.2, etherscan_min_request_interval_seconds) })} />
+          <NumberField label="ETH新闻回扫块/线索" value={config.eth_candidate_history_blocks_per_news ?? 1440} onChange={(eth_candidate_history_blocks_per_news) => setConfig({ eth_candidate_history_blocks_per_news: Math.max(1, eth_candidate_history_blocks_per_news) })} />
+          <NumberField label="底表保留天数" value={config.btc_candidate_retention_days ?? 90} onChange={(btc_candidate_retention_days) => setConfig({ btc_candidate_retention_days: Math.max(1, btc_candidate_retention_days) })} />
+        </div>
+      </details>
+      <IbitTargetSettings setNotice={setNotice} onSaveStrategy={onSaveStrategy} />
+      <div className="field-help-list">
+        <span><b>需要改</b>：已订阅 BTC 地址、四个 IBIT 提醒开关、新闻 RSS/关键词、底表最小 BTC/ETH、Etherscan API Key、新闻提醒置信度。</span>
+        <span><b>提醒开关</b>：BTC 链上地址操作、BTC 地址簇大额转出、新闻线索匹配、ETF 资金流现在分别控制。</span>
+        <span><b>通常不用动</b>：iShares、Farside、BTC Explorer、补扫区块、保留天数。</span>
+        <span><b>候选地址</b>：现在只是辅助池；真正持续监控和飞书筛选看“已订阅 BTC 地址”。</span>
+      </div>
+    </div>
+  );
+}
+
+function IbitNotifierBindingStatus({
+  strategy,
+  notifiers,
+  whaleTargets
+}: {
+  strategy: MutableStrategy;
+  notifiers: NotifierTarget[];
+  whaleTargets: WhaleTarget[];
+}) {
+  const notifierId = String(strategy.notifier_id ?? "").trim();
+  const notifier = notifierId ? notifiers.find((item) => item.id === notifierId) : null;
+  const ibitTarget = whaleTargets.find(isBlackRockTarget) ?? null;
+  const ibitTargetId = ibitTarget?.id ?? "";
+  const targetFilter = arr(notifier?.config?.whale_target_ids);
+  const btcFilter = arr(notifier?.config?.whale_btc_addresses);
+  const targetById = new Map(whaleTargets.map((target) => [target.id, target]));
+  const labels = ibitTarget?.config?.btc_address_labels && typeof ibitTarget.config.btc_address_labels === "object"
+    ? ibitTarget.config.btc_address_labels as Record<string, any>
+    : {};
+  const subscribedAddresses = configuredBtcAddresses(ibitTarget);
+  const subscribedSet = new Set(subscribedAddresses.map(normalizeAddress));
+  const selectedTargetLabels = targetFilter.map((id) => targetById.get(id)?.label ?? id);
+  const selectedBtcLabels = btcFilter.map((address) => btcAddressLabel(address, labels, ibitTarget?.label ?? "BTC 地址"));
+  const staleBtcFilters = btcFilter.filter((address) => !subscribedSet.has(normalizeAddress(address)));
+  const extraTargets = targetFilter.filter((id) => id !== ibitTargetId);
+  const reminderSwitches = [
+    ibitNotificationEnabled(strategy.config, "blackrock_btc_address_operation_notification_enabled"),
+    ibitNotificationEnabled(strategy.config, "blackrock_btc_outflow_notification_enabled"),
+    ibitNotificationEnabled(strategy.config, "ibit_news_candidate_notification_enabled"),
+    ibitNotificationEnabled(strategy.config, "blackrock_etf_flow_notification_enabled")
+  ];
+  const issues: string[] = [];
+
+  if (!notifierId) {
+    issues.push("巨鲸/IBIT 策略还没有绑定机器人，IBIT 飞书提醒不会发送。");
+  } else if (!notifier) {
+    issues.push(`策略绑定的机器人「${notifierId}」不存在，请在 Webhook 机器人里新增或重新选择。`);
+  } else {
+    if (!notifier.enabled) issues.push(`当前绑定机器人「${notifier.name || notifier.id}」未启用。`);
+    if (notifier.type !== "feishu") issues.push("当前绑定的不是飞书机器人，请确认是否要把 IBIT 提醒发到这个通道。");
+    if (!targetFilter.length) issues.push("机器人未指定账户范围：当前会接收全部巨鲸/IBIT 账户，若只收 IBIT 请勾选 IBIT 账户。");
+    if (ibitTargetId && targetFilter.length && !targetFilter.includes(ibitTargetId)) {
+      issues.push("机器人账户范围未包含 IBIT 账户，IBIT 事件会被过滤掉。");
+    }
+    if (extraTargets.length) {
+      issues.push(`账户范围还包含 ${extraTargets.map((id) => targetById.get(id)?.label ?? id).join("、")}，这个机器人会同时收到这些账户提醒。`);
+    }
+    if (!btcFilter.length) issues.push("机器人未指定 BTC 地址范围：当前会接收所选账户下全部 BTC 链事件。");
+    if (staleBtcFilters.length) {
+      issues.push(`BTC 地址范围里有 ${staleBtcFilters.length} 条不在 IBIT 已订阅地址中，请清理无效筛选。`);
+    }
+    if (btcFilter.length) {
+      issues.push("已限制到具体 BTC 地址：ETF资金流、iShares 官方持仓这类不带链上地址的 IBIT 事件可能不会发送到该机器人。");
+    }
+  }
+  if (!reminderSwitches.some(Boolean)) {
+    issues.push("4 个 IBIT 提醒开关全部关闭，IBIT 事件会记录在系统里但不会发飞书。");
+  }
+  if (!Boolean(strategy.config.ibit_news_enabled) && ibitNotificationEnabled(strategy.config, "ibit_news_candidate_notification_enabled")) {
+    issues.push("新闻线索采集未启用，新闻线索匹配提醒不会产生。");
+  }
+
+  if (!ibitTarget) {
+    issues.push("还没有 IBIT 账户记录，请先在下面的 IBIT 地址管理里保存。");
+  } else if (!subscribedAddresses.length) {
+    issues.push("IBIT 账户还没有已订阅 BTC 地址，链上地址操作不会产生提醒。");
+  }
+
+  const hasIssue = issues.length > 0;
+  const boundLabel = notifier ? `${notifier.name || notifier.id}（${notifier.id}）` : notifierId ? `未找到：${notifierId}` : "未绑定";
+  const accountScope = !notifier
+    ? "未配置"
+    : targetFilter.length ? selectedTargetLabels.join("、") : "全部巨鲸/IBIT 账户";
+  const btcScope = !notifier
+    ? "未配置"
+    : btcFilter.length ? selectedBtcLabels.join("、") : "全部 BTC 链事件";
+  const ibitScope = ibitTarget
+    ? `${ibitTarget.label} · ${subscribedAddresses.length} 条已订阅 BTC 链`
+    : "未创建 IBIT 账户";
+
+  return (
+    <div className={`ibit-notifier-status ${hasIssue ? "ibit-notifier-status--warning" : "ibit-notifier-status--ok"}`}>
+      <div className="ibit-notifier-status__head">
+        <strong>当前绑定机器人 + 接收范围</strong>
+        <span>{hasIssue ? "需要确认" : "配置正常"}</span>
+      </div>
+      <div className="ibit-notifier-status__grid">
+        <span><b>绑定机器人</b><em>{boundLabel}</em></span>
+        <span><b>账户范围</b><em>{accountScope}</em></span>
+        <span><b>BTC 地址范围</b><em>{btcScope}</em></span>
+        <span><b>IBIT 订阅</b><em>{ibitScope}</em></span>
+      </div>
+      {hasIssue ? (
+        <div className="ibit-notifier-status__issues">
+          {issues.map((issue) => <span key={issue}>{issue}</span>)}
+        </div>
+      ) : (
+        <p>这个机器人会接收 IBIT 账户范围内的链上地址、新闻线索和 ETF 资金流事件。</p>
+      )}
+    </div>
+  );
+}
+
+function IbitTargetSettings({ setNotice, onSaveStrategy }: { setNotice: (notice: string) => void; onSaveStrategy: () => void }) {
+  const queryClient = useQueryClient();
+  const whalesQuery = useQuery({ queryKey: ["whales"], queryFn: api.whales });
+  const target = (whalesQuery.data ?? []).find(isBlackRockTarget);
+  const [draft, setDraft] = useState<WhaleTargetUpsert | null>(null);
+  const [newAddress, setNewAddress] = useState("");
+  const [newSuspectedAddress, setNewSuspectedAddress] = useState("");
+  useEffect(() => {
+    if (target) setDraft(whaleToDraft(target));
+  }, [target]);
+  const saveTarget = useMutation({
+    mutationFn: api.saveWhaleTarget,
+    onSuccess: () => {
+      setNotice("IBIT 地址订阅已保存");
+      void queryClient.invalidateQueries({ queryKey: ["whales"] });
+      void queryClient.invalidateQueries({ queryKey: ["snapshot"] });
+      if (target?.id) void queryClient.invalidateQueries({ queryKey: ["whale", target.id] });
+    },
+    onError: (error) => setNotice(`IBIT 地址保存失败：${readErrorMessage(error)}`)
+  });
+  const config = draft?.config ?? {};
+  const labels = config.btc_address_labels && typeof config.btc_address_labels === "object" ? config.btc_address_labels as Record<string, any> : {};
+  const addresses = arr(config.btc_addresses);
+  const suspected = arr(config.suspected_btc_addresses);
+  const updateConfig = (patch: Record<string, unknown>) => {
+    setDraft((current) => current ? { ...current, config: { ...current.config, ...patch } } : current);
+  };
+  const addAddress = () => {
+    const address = newAddress.trim();
+    if (!address) return;
+    updateConfig({ btc_addresses: uniqueStrings([...addresses, address]) });
+    setNewAddress("");
+  };
+  const removeAddress = (address: string) => {
+    const nextLabels = { ...labels };
+    delete nextLabels[address];
+    delete nextLabels[address.toLowerCase()];
+    updateConfig({
+      btc_addresses: addresses.filter((item) => item.toLowerCase() !== address.toLowerCase()),
+      btc_address_labels: nextLabels
+    });
+  };
+  const updateLabel = (address: string, label: string) => {
+    updateConfig({ btc_address_labels: { ...labels, [address]: label } });
+  };
+  const addSuspectedAddress = () => {
+    const address = newSuspectedAddress.trim();
+    if (!address) return;
+    updateConfig({ suspected_btc_addresses: uniqueStrings([...suspected, address]) });
+    setNewSuspectedAddress("");
+  };
+  const subscribeSuspected = (address: string) => {
+    updateConfig({
+      btc_addresses: uniqueStrings([...addresses, address]),
+      suspected_btc_addresses: suspected.filter((item) => item.toLowerCase() !== address.toLowerCase())
+    });
+  };
+  const removeSuspectedAddress = (address: string) => {
+    updateConfig({ suspected_btc_addresses: suspected.filter((item) => item.toLowerCase() !== address.toLowerCase()) });
+  };
+  const saveIbitSettings = () => {
+    if (!draft) return;
+    onSaveStrategy();
+    saveTarget.mutate(draft);
+  };
+  if (!draft) return <span className="empty">正在加载 IBIT 目标配置…</span>;
+  return (
+    <div className="ibit-target-settings">
+      <div className="ibit-target-settings__head">
+        <strong>IBIT 地址管理</strong>
+        <Switch checked={draft.enabled} onChange={(enabled) => setDraft({ ...draft, enabled })} label="启用目标" />
+      </div>
+      <div className="form-grid">
+        <TextField label="显示名称" value={draft.label} onChange={(label) => setDraft({ ...draft, label })} />
+        <TextField label="来源链接" value={String(draft.config.source_url ?? "")} onChange={(source_url) => updateConfig({ source_url })} />
+      </div>
+      <div className="address-manager">
+        <div className="address-manager__head">
+          <strong>已订阅 BTC 地址</strong>
+          <span>{addresses.length} 条</span>
+        </div>
+        {addresses.map((address) => (
+          <div className="address-manager__row" key={address}>
+            <code title={address}>{shortText(address, 14)}</code>
+            <input value={String(labels[address] ?? labels[address.toLowerCase()] ?? "")} onChange={(event) => updateLabel(address, event.target.value)} placeholder="地址命名，例如 贝莱德 / IBIT" />
+            <button className="danger-button" onClick={() => removeAddress(address)}><Trash2 size={14} /> 取消订阅</button>
+          </div>
+        ))}
+        {!addresses.length && <span className="empty">暂无订阅地址。可从 IBIT 新闻线索或大额底表点击订阅，也可以在这里手动添加。</span>}
+        <div className="address-manager__add">
+          <input value={newAddress} onChange={(event) => setNewAddress(event.target.value)} placeholder="粘贴 BTC 地址" />
+          <button onClick={addAddress} disabled={!newAddress.trim()}><Plus size={14} /> 添加订阅</button>
+        </div>
+      </div>
+      <details className="advanced-settings">
+        <summary>疑似地址池（辅助）</summary>
+        <div className="address-manager">
+          {suspected.map((address) => (
+            <div className="address-manager__row" key={address}>
+              <code title={address}>{shortText(address, 14)}</code>
+              <span className="muted">不会按订阅地址推送；确认后再订阅。</span>
+              <button onClick={() => subscribeSuspected(address)}><Plus size={14} /> 转为订阅</button>
+              <button className="danger-button" onClick={() => removeSuspectedAddress(address)}><Trash2 size={14} /> 删除</button>
+            </div>
+          ))}
+          {!suspected.length && <span className="empty">暂无疑似地址；这不是主流程，可以不维护。</span>}
+          <div className="address-manager__add">
+            <input value={newSuspectedAddress} onChange={(event) => setNewSuspectedAddress(event.target.value)} placeholder="可选：手动加入疑似 BTC 地址" />
+            <button onClick={addSuspectedAddress} disabled={!newSuspectedAddress.trim()}><Plus size={14} /> 加入疑似</button>
+          </div>
+        </div>
+      </details>
+      <button className="primary-action" onClick={saveIbitSettings} disabled={saveTarget.isPending || !draft.label.trim() || !draft.address_or_subject.trim()}><Save size={16} /> 保存 IBIT 配置</button>
     </div>
   );
 }
@@ -2346,6 +3771,217 @@ function arr(value: unknown): string[] {
   return Array.isArray(value) ? value.map(String) : [];
 }
 
+function uniqueStrings(values: string[]): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  values.map((value) => value.trim()).filter(Boolean).forEach((value) => {
+    const key = value.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    result.push(value);
+  });
+  return result;
+}
+
+function normalizeAddress(value: unknown) {
+  return String(value ?? "").trim().toLowerCase();
+}
+
+function isBtcAddress(value: unknown) {
+  return /^(?:bc1[ac-hj-np-z02-9]{11,90}|[13][a-km-zA-HJ-NP-Z1-9]{25,34})$/i.test(String(value ?? "").trim());
+}
+
+function extractBtcAddressesFromText(value: unknown): string[] {
+  const text = String(value ?? "");
+  return uniqueStrings(text.match(/\b(?:bc1[ac-hj-np-z02-9]{11,90}|[13][a-km-zA-HJ-NP-Z1-9]{25,34})\b/gi) ?? []);
+}
+
+function configuredBtcAddresses(target?: WhaleTarget | null): string[] {
+  if (!target) return [];
+  return uniqueStrings([
+    ...extractBtcAddressesFromText(target.address_or_subject),
+    ...arr(target.config?.btc_addresses)
+  ]);
+}
+
+function subscribedBtcAddressSet(target?: WhaleTarget | null) {
+  return new Set(configuredBtcAddresses(target).map(normalizeAddress));
+}
+
+function isSubscribedBtcAddress(target: WhaleTarget, address: string) {
+  return subscribedBtcAddressSet(target).has(normalizeAddress(address));
+}
+
+function rowsForAddress(value: unknown, address: string): Array<Record<string, any>> {
+  if (!value || typeof value !== "object") return [];
+  const map = value as Record<string, unknown>;
+  const direct = map[address] ?? map[address.toLowerCase()];
+  return Array.isArray(direct) ? direct as Array<Record<string, any>> : [];
+}
+
+function isBlackRockTarget(target: WhaleTarget) {
+  return String(target.config?.provider ?? "").trim().toLowerCase() === "blackrock_free_monitor";
+}
+
+function ibitAddressRows(target: WhaleTarget, detail?: WhaleDetail | null): BtcAddressView[] {
+  const raw = detail?.snapshot?.raw ?? {};
+  const cluster = raw.btc_cluster && typeof raw.btc_cluster === "object" ? raw.btc_cluster as Record<string, any> : {};
+  const news = raw.news_signals && typeof raw.news_signals === "object" ? raw.news_signals as Record<string, any> : {};
+  const activity = cluster.address_activity && typeof cluster.address_activity === "object" ? cluster.address_activity as Record<string, any> : {};
+  const confirmedActivity = news.confirmed_address_activity && typeof news.confirmed_address_activity === "object" ? news.confirmed_address_activity as Record<string, any> : {};
+  const suspectedActivity = news.suspected_address_activity && typeof news.suspected_address_activity === "object" ? news.suspected_address_activity as Record<string, any> : {};
+  const labels = target.config?.btc_address_labels && typeof target.config.btc_address_labels === "object" ? target.config.btc_address_labels as Record<string, any> : {};
+  const rows = new Map<string, BtcAddressView>();
+  const upsert = (address: string, patch: Partial<BtcAddressView>) => {
+    const key = address.trim();
+    if (!key) return;
+    const current = rows.get(key);
+    const operations = patch.operations ?? current?.operations ?? [];
+    const signals = patch.signals ?? current?.signals ?? [];
+    const reasons = patch.reasons ?? current?.reasons ?? [];
+    rows.set(key, {
+      targetId: target.id,
+      targetLabel: target.label,
+      address: key,
+      label: String(patch.label ?? current?.label ?? btcAddressLabel(key, labels, target.label)),
+      role: patch.role ?? current?.role ?? "suspected",
+      confidence: Math.max(Number(current?.confidence ?? 0), Number(patch.confidence ?? 0)),
+      operations: mergeOperations(current?.operations ?? [], operations),
+      signals: mergeSignals(current?.signals ?? [], signals),
+      reasons: Array.from(new Set([...(current?.reasons ?? []), ...reasons.map(String)]))
+    });
+  };
+  const confirmedAddresses = configuredBtcAddresses(target);
+  const confirmedAddressSet = new Set(confirmedAddresses.map(normalizeAddress));
+  confirmedAddresses.forEach((address) => {
+    upsert(address, {
+      role: "confirmed",
+      operations: mergeOperations(rowsForAddress(activity, address), rowsForAddress(confirmedActivity, address)),
+      confidence: 1
+    });
+  });
+  arr(target.config?.suspected_btc_addresses)
+    .filter((address) => !confirmedAddressSet.has(normalizeAddress(address)))
+    .forEach((address) => {
+      upsert(address, {
+        role: "suspected",
+        operations: rowsForAddress(suspectedActivity, address),
+        confidence: 0.5,
+        reasons: ["后台手动加入疑似地址池"]
+      });
+    });
+  const suspected = Array.isArray(news.suspected_addresses) ? news.suspected_addresses as Array<Record<string, any>> : [];
+  suspected.forEach((item) => {
+    const address = String(item.address ?? "");
+    if (!address) return;
+    upsert(address, {
+      role: confirmedAddressSet.has(normalizeAddress(address)) ? "confirmed" : "suspected",
+      label: btcAddressLabel(address, labels, target.label),
+      confidence: Number(item.confidence ?? 0),
+      operations: Array.isArray(item.latest_operations) ? item.latest_operations as Array<Record<string, any>> : [],
+      signals: Array.isArray(item.signals) ? item.signals as Array<Record<string, any>> : [],
+      reasons: Array.isArray(item.reasons) ? item.reasons.map(String) : []
+    });
+  });
+  return Array.from(rows.values()).sort((a, b) => {
+    if (a.role !== b.role) return a.role === "confirmed" ? -1 : 1;
+    return b.confidence - a.confidence || b.operations.length - a.operations.length;
+  });
+}
+
+function btcAddressLabel(address: string, labels: Record<string, any>, fallback: string) {
+  const exact = labels[address] ?? labels[address.toLowerCase()];
+  if (exact) return String(exact);
+  if (/blackrock|ibit|贝莱德/i.test(fallback)) return "贝莱德 / IBIT";
+  return fallback || shortText(address, 8);
+}
+
+function mergeOperations(a: Array<Record<string, any>>, b: Array<Record<string, any>>) {
+  const rows = new Map<string, Record<string, any>>();
+  [...a, ...b].forEach((item) => {
+    const key = `${String(item.txid ?? "")}:${String(item.direction ?? item.behavior ?? "")}`;
+    if (key.trim() !== ":") rows.set(key, item);
+  });
+  return Array.from(rows.values()).sort((left, right) => Number(right.timestamp_ms ?? 0) - Number(left.timestamp_ms ?? 0));
+}
+
+function mergeSignals(a: Array<Record<string, any>>, b: Array<Record<string, any>>) {
+  const rows = new Map<string, Record<string, any>>();
+  [...a, ...b].forEach((item) => rows.set(newsSignalKey(item), item));
+  return Array.from(rows.values()).sort((left, right) => String(right.published_at ?? "").localeCompare(String(left.published_at ?? "")));
+}
+
+function btcCounterpartyText(operation: Record<string, any>) {
+  const direction = String(operation.direction ?? "");
+  const source = direction === "out" ? operation.output_counterparties : operation.input_counterparties;
+  if (!Array.isArray(source)) return "";
+  return source.slice(0, 3).map((item) => {
+    if (item && typeof item === "object") {
+      const address = String((item as Record<string, any>).address ?? "");
+      const value = Number((item as Record<string, any>).value_btc ?? 0);
+      return value > 0 ? `${shortText(address, 8)} ${formatNumber(value, 4)} BTC` : shortText(address, 8);
+    }
+    return shortText(item, 8);
+  }).filter(Boolean).join(" / ");
+}
+
+function addressActivityRows(value: unknown): Record<string, any>[] {
+  if (!value || typeof value !== "object") return [];
+  const rows: Record<string, any>[] = Object.entries(value as Record<string, unknown>)
+    .flatMap(([address, rows]) => Array.isArray(rows) ? rows.map((row) => ({ ...(row as Record<string, any>), address: String((row as Record<string, any>).address ?? address) })) : []);
+  return rows
+    .sort((a, b) => Number(b.timestamp_ms ?? 0) - Number(a.timestamp_ms ?? 0))
+    .slice(0, 80);
+}
+
+function addressActivityCount(value: unknown) {
+  if (!value || typeof value !== "object") return 0;
+  return Object.values(value as Record<string, unknown>).reduce<number>((total, rows) => total + (Array.isArray(rows) ? rows.length : 0), 0);
+}
+
+function newsSignalKey(signal: Record<string, any>) {
+  return String(signal.id ?? signal.url ?? signal.title ?? "");
+}
+
+function suspectedMatchesForSignal(items: Record<string, any>[], signal: Record<string, any>) {
+  const id = String(signal.id ?? "");
+  const url = String(signal.url ?? "");
+  const title = String(signal.title ?? "");
+  return items
+    .map((item) => {
+      const signals = Array.isArray(item.signals) ? item.signals as Record<string, any>[] : [];
+      const matched = signals.find((candidate) => (
+        (id && String(candidate.id ?? "") === id)
+        || (url && String(candidate.url ?? "") === url)
+        || (title && String(candidate.title ?? "") === title)
+      ));
+      if (!matched) return null;
+      return {
+        item,
+        signal: matched,
+        confidence: Number(matched.confidence ?? item.confidence ?? 0)
+      };
+    })
+    .filter((value): value is { item: Record<string, any>; signal: Record<string, any>; confidence: number } => value !== null)
+    .sort((a, b) => b.confidence - a.confidence || Number(b.item.signal_count ?? 0) - Number(a.item.signal_count ?? 0));
+}
+
+function newsMatchedAddressCount(signals: Record<string, any>[], items: Record<string, any>[]) {
+  const addresses = new Set<string>();
+  for (const signal of signals) {
+    for (const match of suspectedMatchesForSignal(items, signal)) {
+      addresses.add(String(match.item.address));
+    }
+  }
+  return addresses.size;
+}
+
+function shortText(value: unknown, edge = 8) {
+  const text = String(value ?? "");
+  if (text.length <= edge * 2 + 3) return text;
+  return `${text.slice(0, edge)}…${text.slice(-edge)}`;
+}
+
 function tradeCoinThresholds(config: Record<string, any>): Record<string, number> {
   return typeof config.trade_coin_thresholds === "object" && config.trade_coin_thresholds !== null
     ? config.trade_coin_thresholds as Record<string, number>
@@ -2356,6 +3992,10 @@ function tradeCoinThreshold(config: Record<string, any>, coin: string, fallback:
   const thresholds = tradeCoinThresholds(config);
   const value = Number(thresholds[coin]);
   return Number.isFinite(value) ? value : fallback;
+}
+
+function ibitNotificationEnabled(config: Record<string, any>, key: string) {
+  return Boolean(config[key] ?? config.blackrock_free_notification_enabled ?? true);
 }
 
 function isLargeTrade(fill: Record<string, any>, config: Record<string, any>) {
@@ -2421,6 +4061,7 @@ function createNotifier(): NotifierTarget {
     type: "feishu",
     enabled: false,
     secrets: { webhook_url: "" },
+    config: { whale_target_ids: [], whale_btc_addresses: [] },
     created_at: "",
     updated_at: ""
   };
@@ -2471,6 +4112,7 @@ function mergeWhaleCandidate(target: WhaleTargetUpsert, candidate: WhaleAddressC
 }
 
 function isIncompleteWhaleTarget(target: WhaleTargetUpsert) {
+  if (String(target.config.provider ?? "") === "blackrock_free_monitor") return false;
   const values = [target.address_or_subject, ...arr(target.config.addresses)];
   return !values.some((value) => /^0x[a-fA-F0-9]{40}$/.test(value)) || values.some((value) => value.includes("..."));
 }

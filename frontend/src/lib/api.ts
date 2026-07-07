@@ -1,8 +1,14 @@
 import type {
   AlertEvent,
+  BtcLargeTransfer,
+  BtcLargeTransferList,
+  BtcLargeTransferRescanResult,
+  BtcLargeTransferStats,
   DashboardLayout,
   DashboardModule,
   Kline,
+  IbitHistorySyncJobStatus,
+  IbitHistorySyncResult,
   NewsEvent,
   NewsTranslateResult,
   NotifierTarget,
@@ -65,6 +71,28 @@ export const api = {
   resolveWhaleAddress: (query: string) => request<WhaleAddressResolveResponse>("/api/whales/resolve", { method: "POST", body: JSON.stringify({ query }) }),
   saveWhaleTarget: (target: WhaleTargetUpsert) => request<WhaleTarget>("/api/whales", { method: "PUT", body: JSON.stringify(target) }),
   deleteWhaleTarget: (id: string) => request<{ ok: boolean }>(`/api/whales/${id}`, { method: "DELETE" }),
+  confirmWhaleBtcAddress: (targetId: string, address: string, role: "candidate" | "confirmed" = "candidate", label?: string) =>
+    request<WhaleTarget>(`/api/whales/${targetId}/btc-addresses/confirm`, { method: "POST", body: JSON.stringify({ address, role, label }) }),
+  syncIbitHistory: (targetId: string, payload: { lookback_days?: number; max_news_items?: number } = { lookback_days: 30, max_news_items: 300 }) =>
+    request<IbitHistorySyncResult>(`/api/whales/${targetId}/ibit-history-sync`, { method: "POST", body: JSON.stringify(payload) }),
+  startIbitHistorySyncJob: (targetId: string, payload: { lookback_days?: number; max_news_items?: number } = { lookback_days: 30, max_news_items: 300 }) =>
+    request<IbitHistorySyncJobStatus>(`/api/whales/${targetId}/ibit-history-sync/jobs`, { method: "POST", body: JSON.stringify(payload) }),
+  ibitHistorySyncJob: (targetId: string, jobId: string) =>
+    request<IbitHistorySyncJobStatus>(`/api/whales/${targetId}/ibit-history-sync/jobs/${jobId}`),
   whaleDetail: (id: string) => request<WhaleDetail>(`/api/whales/${id}`),
+  btcLargeTransfers: (params: { limit?: number; offset?: number; min_btc?: number; query?: string; matched_only?: boolean } = {}) => {
+    const search = new URLSearchParams();
+    Object.entries(params).forEach(([key, value]) => {
+      if (value !== undefined && value !== null && value !== "") search.set(key, String(value));
+    });
+    return request<BtcLargeTransferList>(`/api/btc/large-transfers${search.toString() ? `?${search}` : ""}`);
+  },
+  btcLargeTransferStats: () => request<BtcLargeTransferStats>("/api/btc/large-transfers/stats"),
+  btcLargeTransfer: (txid: string) => request<BtcLargeTransfer>(`/api/btc/large-transfers/${txid}`),
+  rescanBtcLargeTransfers: (payload: number | { blocks?: number | null; start_utc?: string; end_utc?: string; max_blocks?: number } = 3) =>
+    request<BtcLargeTransferRescanResult>("/api/btc/large-transfers/rescan", {
+      method: "POST",
+      body: JSON.stringify(typeof payload === "number" ? { blocks: payload } : payload)
+    }),
   klines: (symbol: string, interval = "15m", limit = 90) => request<Kline[]>(`/api/market/klines/${symbol}/${interval}?limit=${limit}`)
 };
