@@ -9,6 +9,8 @@ from urllib.parse import quote
 
 import requests
 
+from .rate_limit import wait_for_host_rate_limit
+
 
 SATOSHI = 100_000_000
 DEFAULT_BLOCKSTREAM_BASE_URL = "https://blockstream.info/api"
@@ -23,9 +25,10 @@ class BtcLargeTransferProvider:
     source_name = "btc_large_transfers"
     label = "BTC Large Transfers"
 
-    def __init__(self, base_url: str = DEFAULT_BLOCKSTREAM_BASE_URL, timeout_seconds: int = 20) -> None:
+    def __init__(self, base_url: str = DEFAULT_BLOCKSTREAM_BASE_URL, timeout_seconds: int = 20, min_request_interval_seconds: float = 0.6) -> None:
         self.base_url = base_url.rstrip("/")
         self.timeout_seconds = timeout_seconds
+        self.min_request_interval_seconds = max(0.0, float(min_request_interval_seconds))
 
     def latest_height(self) -> int:
         text = self._get_text("/blocks/tip/height")
@@ -92,6 +95,7 @@ class BtcLargeTransferProvider:
         last_error: requests.RequestException | None = None
         for attempt in range(5):
             try:
+                self._wait_for_rate_limit()
                 response = requests.get(
                     f"{self.base_url}{path}",
                     headers={"accept": accept, "User-Agent": "CryptoMonitor/0.1"},
@@ -108,6 +112,9 @@ class BtcLargeTransferProvider:
                     time.sleep(1.2 * (attempt + 1))
                     continue
         raise BtcLargeTransferError(f"Blockstream BTC request failed: {last_error}") from last_error
+
+    def _wait_for_rate_limit(self) -> None:
+        wait_for_host_rate_limit(self.base_url, self.min_request_interval_seconds)
 
 
 def parse_btc_large_transfer(

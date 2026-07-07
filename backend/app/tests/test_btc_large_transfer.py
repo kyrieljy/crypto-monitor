@@ -4,7 +4,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from backend.app.core.database import Database
-from backend.app.services.btc_large_transfer import match_news_signal_to_large_transfers, parse_btc_large_transfer
+from backend.app.services.rate_limit import reset_host_rate_limits_for_tests
+from backend.app.services.btc_large_transfer import BtcLargeTransferProvider, match_news_signal_to_large_transfers, parse_btc_large_transfer
 from backend.app.services.eth_large_transfer import EthLargeTransferProvider, parse_eth_large_transfer
 from backend.app.services.store import Store
 
@@ -55,6 +56,67 @@ def test_btc_large_transfer_store_dedupes_txid(tmp_path: Path) -> None:
     assert rows.items[0].chain == "btc"
     assert rows.items[0].asset == "BTC"
     assert rows.items[0].amount == 4917
+
+
+def test_btc_large_transfer_provider_throttles_consecutive_requests(monkeypatch) -> None:
+    reset_host_rate_limits_for_tests()
+    now = [1000.0]
+    sleeps: list[float] = []
+
+    def fake_monotonic() -> float:
+        return now[0]
+
+    def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        now[0] += seconds
+
+    class FakeResponse:
+        status_code = 200
+        text = "ok"
+
+        def raise_for_status(self) -> None:
+            return None
+
+    monkeypatch.setattr("backend.app.services.rate_limit.time.monotonic", fake_monotonic)
+    monkeypatch.setattr("backend.app.services.rate_limit.time.sleep", fake_sleep)
+    monkeypatch.setattr("backend.app.services.btc_large_transfer.requests.get", lambda *args, **kwargs: FakeResponse())
+
+    provider = BtcLargeTransferProvider("https://blockstream.test/api", min_request_interval_seconds=0.25)
+    provider._get_text("/blocks/tip/height")
+    provider._get_text("/blocks/tip/height")
+
+    assert sleeps == [0.25]
+
+
+def test_btc_large_transfer_provider_throttles_same_host_across_instances(monkeypatch) -> None:
+    reset_host_rate_limits_for_tests()
+    now = [2000.0]
+    sleeps: list[float] = []
+
+    def fake_monotonic() -> float:
+        return now[0]
+
+    def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        now[0] += seconds
+
+    class FakeResponse:
+        status_code = 200
+        text = "ok"
+
+        def raise_for_status(self) -> None:
+            return None
+
+    monkeypatch.setattr("backend.app.services.rate_limit.time.monotonic", fake_monotonic)
+    monkeypatch.setattr("backend.app.services.rate_limit.time.sleep", fake_sleep)
+    monkeypatch.setattr("backend.app.services.btc_large_transfer.requests.get", lambda *args, **kwargs: FakeResponse())
+
+    first = BtcLargeTransferProvider("https://blockstream.test/api", min_request_interval_seconds=0.25)
+    second = BtcLargeTransferProvider("https://blockstream.test/api", min_request_interval_seconds=0.25)
+    first._get_text("/blocks/tip/height")
+    second._get_text("/blocks/tip/hash")
+
+    assert sleeps == [0.25]
 
 
 def test_btc_news_match_upsert_refreshes_signal_snapshot(tmp_path: Path) -> None:

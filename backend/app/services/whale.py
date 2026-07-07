@@ -13,6 +13,8 @@ from xml.etree import ElementTree as ET
 
 import requests
 
+from .rate_limit import wait_for_host_rate_limit
+
 
 ADDRESS_RE = re.compile(r"0x[a-fA-F0-9]{40}")
 MASKED_ADDRESS_RE = re.compile(r"0x[a-fA-F0-9]{3,12}\.{2,}[a-fA-F0-9]{3,12}")
@@ -590,6 +592,7 @@ class BlackRockFreeProvider:
         farside_url: str = "https://farside.co.uk/btc/",
         blockstream_base_url: str = "https://blockstream.info/api",
         timeout_seconds: int = 20,
+        blockstream_min_request_interval_seconds: float = 0.6,
     ) -> None:
         self.ishares_url = ishares_url
         self.farside_url = farside_url
@@ -599,6 +602,7 @@ class BlackRockFreeProvider:
             if url.rstrip("/") != self.blockstream_base_url
         ]
         self.timeout_seconds = timeout_seconds
+        self.blockstream_min_request_interval_seconds = max(0.0, float(blockstream_min_request_interval_seconds))
 
     def fetch(
         self,
@@ -1024,18 +1028,29 @@ class BlackRockFreeProvider:
     def _get_json(self, path: str) -> Any:
         errors: list[str] = []
         for base_url in [self.blockstream_base_url, *self.blockstream_fallback_base_urls]:
-            try:
-                response = requests.get(
-                    f"{base_url}{path}",
-                    headers={"accept": "application/json", "User-Agent": "CryptoMonitor/0.1"},
-                    timeout=self.timeout_seconds,
-                )
-                response.raise_for_status()
-                return response.json()
-            except requests.RequestException as exc:
-                errors.append(f"{base_url}: {exc}")
-                continue
+            for attempt in range(5):
+                try:
+                    self._wait_for_blockstream_rate_limit()
+                    response = requests.get(
+                        f"{base_url}{path}",
+                        headers={"accept": "application/json", "User-Agent": "CryptoMonitor/0.1"},
+                        timeout=self.timeout_seconds,
+                    )
+                    if response.status_code == 429 and attempt < 4:
+                        time.sleep(1.5 * (attempt + 1))
+                        continue
+                    response.raise_for_status()
+                    return response.json()
+                except requests.RequestException as exc:
+                    errors.append(f"{base_url}: {exc}")
+                    if attempt < 4:
+                        time.sleep(1.2 * (attempt + 1))
+                        continue
+                    break
         raise WhaleProviderError(f"Blockstream BTC request failed: {'; '.join(errors)}")
+
+    def _wait_for_blockstream_rate_limit(self) -> None:
+        wait_for_host_rate_limit(self.blockstream_base_url, self.blockstream_min_request_interval_seconds)
 
     @staticmethod
     def parse_news_feed(text: str, *, feed_url: str, keywords: list[str]) -> list[dict[str, Any]]:
