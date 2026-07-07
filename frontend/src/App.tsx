@@ -3309,7 +3309,7 @@ function StrategyEditor({
         )}
         {strategy.id === "whitehouse" && (
           <>
-            <TextField label="白宫 Gallery" value={String(config.whitehouse_gallery_url ?? "")} onChange={(whitehouse_gallery_url) => setConfig({ whitehouse_gallery_url })} />
+            <TextField label="白宫来源页" value={String(config.whitehouse_gallery_url ?? "")} onChange={(whitehouse_gallery_url) => setConfig({ whitehouse_gallery_url })} />
             <TextField label="关键词" value={arr(config.include_keywords).join(",")} onChange={(value) => setConfig({ include_keywords: split(value) })} />
             <TextField label="排除词" value={arr(config.exclude_keywords).join(",")} onChange={(value) => setConfig({ exclude_keywords: split(value) })} />
             <span className="hint">命中任一关键词才进入白宫新闻；关键词留空则不过滤。</span>

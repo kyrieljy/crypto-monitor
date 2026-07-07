@@ -22,6 +22,34 @@ def test_whitehouse_keyword_filter_matches_include_and_exclude() -> None:
     assert not adapter._matches_keywords("First Lady visits school")
 
 
+def test_whitehouse_remarks_page_groups_title_and_date_by_url() -> None:
+    html = """
+    <a href="/administration/donald-j-trump/">About President Trump</a>
+    <a href="/remarks/">Remarks</a>
+    <a href="/videos/president-trump-participates-in-a-rose-garden-club-dinner-with-american-farmers/">21:06</a>
+    <a href="/videos/president-trump-participates-in-a-rose-garden-club-dinner-with-american-farmers/">
+      President Trump Participates in a Rose Garden Club Dinner with American Farmers
+    </a>
+    <a href="/videos/president-trump-participates-in-a-rose-garden-club-dinner-with-american-farmers/">June 26, 2026</a>
+    """
+
+    def fetcher(url: str, timeout: int) -> str:
+        return html
+
+    events = WhiteHouseGalleryAdapter(
+        "https://www.whitehouse.gov/remarks/",
+        20,
+        include_keywords=["Trump"],
+        fetcher=fetcher,
+    ).poll().events
+
+    assert len(events) == 1
+    assert events[0].url == "https://www.whitehouse.gov/videos/president-trump-participates-in-a-rose-garden-club-dinner-with-american-farmers/"
+    assert events[0].published_at.date().isoformat() == "2026-06-26"
+    assert events[0].title == "President Trump Participates in a Rose Garden Club Dinner with American Farmers"
+    assert events[0].metadata["date_text"] == "June 26, 2026"
+
+
 def test_truth_rss_media_post_enriches_original_and_card_metadata() -> None:
     feed = """<?xml version="1.0" encoding="UTF-8"?>
     <rss version="2.0" xmlns:truth="https://truthsocial.com/ns">

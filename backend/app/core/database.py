@@ -11,6 +11,8 @@ from .time import utc_now_iso
 
 
 DEFAULT_SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "ZECUSDT"]
+DEFAULT_WHITEHOUSE_URL = "https://www.whitehouse.gov/remarks/"
+LEGACY_WHITEHOUSE_GALLERY_URL = "https://www.whitehouse.gov/gallery/"
 DEFAULT_WHITEHOUSE_INCLUDE_KEYWORDS = [
     "Trump",
     "remarks",
@@ -419,7 +421,7 @@ class Database:
                 1,
                 {
                     "enabled": True,
-                    "whitehouse_gallery_url": "https://www.whitehouse.gov/gallery/",
+                    "whitehouse_gallery_url": DEFAULT_WHITEHOUSE_URL,
                     "include_keywords": DEFAULT_WHITEHOUSE_INCLUDE_KEYWORDS,
                     "exclude_keywords": [],
                     "poll_seconds": 1200,
@@ -683,6 +685,9 @@ class Database:
         if whitehouse_row is not None:
             config = json.loads(whitehouse_row["config_json"])
             changed = False
+            if str(config.get("whitehouse_gallery_url") or "").strip() in {"", LEGACY_WHITEHOUSE_GALLERY_URL}:
+                config["whitehouse_gallery_url"] = DEFAULT_WHITEHOUSE_URL
+                changed = True
             if "include_keywords" not in config:
                 config["include_keywords"] = DEFAULT_WHITEHOUSE_INCLUDE_KEYWORDS
                 changed = True

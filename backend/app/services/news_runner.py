@@ -55,7 +55,7 @@ class NewsRunner:
         if whitehouse and whitehouse.enabled and whitehouse.config.get("enabled", True):
             adapters.append(
                 WhiteHouseGalleryAdapter(
-                    str(whitehouse.config.get("whitehouse_gallery_url", "https://www.whitehouse.gov/gallery/")),
+                    str(whitehouse.config.get("whitehouse_gallery_url", "https://www.whitehouse.gov/remarks/")),
                     self.timeout_seconds,
                     [str(item) for item in whitehouse.config.get("include_keywords", []) if str(item).strip()],
                     [str(item) for item in whitehouse.config.get("exclude_keywords", []) if str(item).strip()],

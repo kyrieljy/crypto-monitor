@@ -565,43 +565,107 @@ class _AnchorCollector(HTMLParser):
 
 class WhiteHouseGalleryAdapter:
     source_name = "whitehouse_gallery"
-    label = "白宫 Gallery"
+    label = "白宫发言"
+    _candidate_path_prefixes = ("/remarks/", "/videos/", "/briefings-statements/")
+    _date_pattern = re.compile(
+        r"\b(January|February|March|April|May|June|July|August|September|October|November|December)\s+"
+        r"([0-3]?\d),\s+(20\d{2})\b",
+        re.IGNORECASE,
+    )
+    _months = {
+        "january": 1,
+        "february": 2,
+        "march": 3,
+        "april": 4,
+        "may": 5,
+        "june": 6,
+        "july": 7,
+        "august": 8,
+        "september": 9,
+        "october": 10,
+        "november": 11,
+        "december": 12,
+    }
 
-    def __init__(self, gallery_url: str, timeout_seconds: int, include_keywords: list[str] | None = None, exclude_keywords: list[str] | None = None) -> None:
+    def __init__(
+        self,
+        gallery_url: str,
+        timeout_seconds: int,
+        include_keywords: list[str] | None = None,
+        exclude_keywords: list[str] | None = None,
+        fetcher: Callable[[str, int], str] | None = None,
+    ) -> None:
         self.gallery_url = gallery_url
         self.timeout_seconds = timeout_seconds
         self.include_keywords = [item.casefold() for item in (include_keywords or []) if item.strip()]
         self.exclude_keywords = [item.casefold() for item in (exclude_keywords or []) if item.strip()]
+        self.fetcher = fetcher or (lambda url, timeout: _http_get(url, timeout))
 
     def poll(self) -> SourcePollResult:
-        html = _http_get(self.gallery_url, self.timeout_seconds)
+        html = self.fetcher(self.gallery_url, self.timeout_seconds)
         collector = _AnchorCollector()
         collector.feed(html)
-        events: list[SpeechEvent] = []
-        seen_urls: set[str] = set()
+        grouped: dict[str, dict[str, str]] = {}
+        order: list[str] = []
+        source_url = self.gallery_url.rstrip("/")
         for href, text in collector.anchors:
             absolute_url = parse.urljoin(self.gallery_url, href)
-            if absolute_url in seen_urls or "/gallery/" not in absolute_url:
+            if absolute_url.rstrip("/") == source_url or not self._is_candidate_url(absolute_url):
                 continue
-            if not self._matches_keywords(text):
+            title = self._clean_title(text)
+            if not title:
                 continue
-            seen_urls.add(absolute_url)
-            title = re.sub(r"^Image:\s*", "", text).strip()
+            item = grouped.setdefault(absolute_url, {})
+            if absolute_url not in order:
+                order.append(absolute_url)
+            date_text = self._extract_date_text(title)
+            if date_text:
+                item["date_text"] = date_text
+                continue
+            if not self._matches_keywords(title):
+                continue
+            current = item.get("title", "")
+            if not current or len(title) > len(current):
+                item["title"] = title
+
+        events: list[SpeechEvent] = []
+        for absolute_url in order:
+            item = grouped[absolute_url]
+            title = item.get("title", "")
+            if not title:
+                continue
+            date_text = item.get("date_text", "")
+            metadata: dict[str, object] = {"source_url": self.gallery_url}
+            if date_text:
+                metadata["date_text"] = date_text
             events.append(
                 SpeechEvent(
                     source_type="public_remarks",
                     source_name=self.source_name,
                     event_id=absolute_url.rstrip("/"),
-                    published_at=self._extract_datetime_from_url(absolute_url),
+                    published_at=self._extract_datetime(date_text or title, absolute_url),
                     title=title,
                     speaker="Donald Trump",
                     content=title,
                     url=absolute_url,
-                    raw_hash=raw_payload_hash(f"{absolute_url}|{title}"),
-                    metadata={"gallery_url": self.gallery_url},
+                    raw_hash=raw_payload_hash(f"{absolute_url}|{title}|{date_text}"),
+                    metadata=metadata,
                 )
             )
         return SourcePollResult(self.source_name, self.label, events)
+
+    def _is_candidate_url(self, url: str) -> bool:
+        parsed = parse.urlparse(url)
+        host = parsed.netloc.lower()
+        if host not in {"whitehouse.gov", "www.whitehouse.gov"}:
+            return False
+        path = parsed.path
+        return any(path.startswith(prefix) for prefix in self._candidate_path_prefixes)
+
+    def _clean_title(self, text: str) -> str:
+        title = re.sub(r"^Image:\s*", "", text).strip()
+        title = re.sub(r"^\d{1,2}:\d{2}\s*", "", title).strip()
+        return title
 
     def _matches_keywords(self, text: str) -> bool:
         normalized = text.casefold()
@@ -611,8 +675,21 @@ class WhiteHouseGalleryAdapter:
             return True
         return any(keyword in normalized for keyword in self.include_keywords)
 
-    @staticmethod
-    def _extract_datetime_from_url(url: str) -> datetime:
+    @classmethod
+    def _extract_date_text(cls, text: str) -> str:
+        match = cls._date_pattern.search(text)
+        return match.group(0) if match else ""
+
+    @classmethod
+    def _extract_datetime(cls, text: str, url: str) -> datetime:
+        date_match = cls._date_pattern.search(text)
+        if date_match:
+            month_name, day, year = date_match.groups()
+            return datetime(int(year), cls._months[month_name.casefold()], int(day), tzinfo=timezone.utc)
+        match = re.search(r"/(20\d{2})/(0[1-9]|1[0-2])/(0[1-9]|[12]\d|3[01])/", url)
+        if match:
+            year, month, day = match.groups()
+            return datetime(int(year), int(month), int(day), tzinfo=timezone.utc)
         match = re.search(r"/(20\d{2})/(0[1-9]|1[0-2])/", url)
         if match:
             year, month = match.groups()
