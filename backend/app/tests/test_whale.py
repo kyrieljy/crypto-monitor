@@ -908,6 +908,40 @@ def test_blackrock_detail_rehydrates_address_operations_from_bottom_table(tmp_pa
             "raw": {"source": "test"},
         }
     )
+    suspected_address = "0x3333333333333333333333333333333333333333"
+    signal = {
+        "id": "news-rehydrated-1",
+        "title": "BlackRock moved ETH to Coinbase",
+        "url": "https://example.com/news-rehydrated-1",
+        "published_at": now,
+        "confidence": 0.6,
+        "candidate_addresses": [],
+        "eth_amounts": [7546],
+        "usd_amounts": [13_200_000],
+        "large_transfer_matches": [
+            {
+                "txid": "eth-rehydrated-1",
+                "chain": "eth",
+                "asset": "ETH",
+                "candidate_address": suspected_address,
+                "address_role": "source",
+                "address_value": 7546,
+                "address_value_eth": 7546,
+                "confidence": 0.85,
+                "reasons": ["链上交易与新闻时间相近"],
+                "source_url": "https://etherscan.io/tx/eth-rehydrated-1",
+                "transfer": {
+                    "txid": "eth-rehydrated-1",
+                    "chain": "eth",
+                    "asset": "ETH",
+                    "block_time_utc": now,
+                    "amount": 7546,
+                    "source_url": "https://etherscan.io/tx/eth-rehydrated-1",
+                },
+            }
+        ],
+    }
+    assert store.save_btc_news_matches(target.id, [signal]) == 1
 
     detail = store.get_whale_detail(target.id)
 
@@ -917,3 +951,11 @@ def test_blackrock_detail_rehydrates_address_operations_from_bottom_table(tmp_pa
     assert activity[eth_address][0]["txid"] == "eth-rehydrated-1"
     assert activity[eth_address][0]["asset"] == "ETH"
     assert detail.account_summary["blackrock_btc_cluster_operation_count"] == 2
+    news = detail.snapshot["raw"]["news_signals"]
+    assert news["signals"][0]["id"] == "news-rehydrated-1"
+    assert news["signals"][0]["large_transfer_matches"][0]["candidate_address"] == suspected_address
+    suspected = {item["address"]: item for item in news["suspected_addresses"]}
+    assert suspected_address in suspected
+    assert suspected[suspected_address]["signals"][0]["id"] == "news-rehydrated-1"
+    assert detail.account_summary["ibit_news_candidate_count"] == 1
+    assert detail.account_summary["ibit_suspected_address_count"] >= 1

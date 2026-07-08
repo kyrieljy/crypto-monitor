@@ -27,7 +27,7 @@ from ..core.database import Database
 from ..core.security import decrypt_json, encrypt_json, mask_secret
 from ..core.text import content_fingerprint, is_probably_same_statement
 from ..core.time import utc_now_iso
-from .whale import extract_addresses, resolve_address_candidates
+from .whale import BlackRockFreeProvider as BlackRockFreeAddressBuilder, extract_addresses, resolve_address_candidates
 
 
 def _json_loads(value: str, fallback):
@@ -115,6 +115,89 @@ def _merge_operation_rows(*groups: list[dict[str, Any]]) -> list[dict[str, Any]]
             if key.strip(":"):
                 rows[key] = item
     return sorted(rows.values(), key=lambda item: _safe_int(item.get("timestamp_ms")), reverse=True)
+
+
+def _news_signal_key(signal: dict[str, Any]) -> str:
+    return str(signal.get("id") or signal.get("url") or signal.get("title") or "").strip()
+
+
+def _merge_match_rows(*groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows: dict[str, dict[str, Any]] = {}
+    for group in groups:
+        for item in group:
+            if not isinstance(item, dict):
+                continue
+            key = ":".join(
+                [
+                    str(item.get("txid") or ""),
+                    str(item.get("candidate_address") or ""),
+                    str(item.get("address_role") or ""),
+                ]
+            )
+            if key.strip(":"):
+                rows[key] = item
+    return sorted(rows.values(), key=lambda item: _safe_float(item.get("confidence")), reverse=True)
+
+
+def _merge_news_signal_rows(*groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows: dict[str, dict[str, Any]] = {}
+    list_fields = ("candidate_addresses", "btc_addresses", "evm_addresses", "txids", "btc_amounts", "eth_amounts", "usd_amounts", "reasons")
+    for group in groups:
+        for signal in group:
+            if not isinstance(signal, dict):
+                continue
+            key = _news_signal_key(signal)
+            if not key:
+                continue
+            current = rows.setdefault(key, {})
+            for field, value in signal.items():
+                if field in (*list_fields, "large_transfer_matches"):
+                    continue
+                if value not in (None, "", [], {}):
+                    current[field] = value
+            current["id"] = current.get("id") or signal.get("id") or key
+            current["confidence"] = max(_safe_float(current.get("confidence")), _safe_float(signal.get("confidence")))
+            for field in list_fields:
+                values = current.get(field) if isinstance(current.get(field), list) else []
+                incoming = signal.get(field) if isinstance(signal.get(field), list) else []
+                current[field] = list(dict.fromkeys([*values, *incoming]))
+            current["large_transfer_matches"] = _merge_match_rows(
+                current.get("large_transfer_matches") if isinstance(current.get("large_transfer_matches"), list) else [],
+                signal.get("large_transfer_matches") if isinstance(signal.get("large_transfer_matches"), list) else [],
+            )
+    return sorted(
+        rows.values(),
+        key=lambda item: (_timestamp_ms(item.get("published_at")), _safe_float(item.get("confidence"))),
+        reverse=True,
+    )
+
+
+def _merge_suspected_address_rows(*groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows: dict[str, dict[str, Any]] = {}
+    for group in groups:
+        for item in group:
+            if not isinstance(item, dict):
+                continue
+            address = str(item.get("address") or "").strip()
+            if not address:
+                continue
+            key = _address_key(address)
+            current = rows.setdefault(key, {"address": address, "confidence": 0.0, "signals": [], "txids": [], "reasons": [], "latest_operations": []})
+            current["address"] = current.get("address") or address
+            current["confidence"] = max(_safe_float(current.get("confidence")), _safe_float(item.get("confidence")))
+            for field in ("signals", "latest_operations"):
+                values = current.get(field) if isinstance(current.get(field), list) else []
+                incoming = item.get(field) if isinstance(item.get(field), list) else []
+                if field == "signals":
+                    current[field] = _merge_news_signal_rows(values, incoming)
+                else:
+                    current[field] = _merge_operation_rows(values, incoming)
+            for field in ("txids", "reasons"):
+                values = current.get(field) if isinstance(current.get(field), list) else []
+                incoming = item.get(field) if isinstance(item.get(field), list) else []
+                current[field] = list(dict.fromkeys([*values, *incoming]))[:20]
+            current["signal_count"] = len(current.get("signals") if isinstance(current.get("signals"), list) else [])
+    return sorted(rows.values(), key=lambda item: (_safe_float(item.get("confidence")), _safe_int(item.get("signal_count"))), reverse=True)
 
 
 def _configured_chain_addresses(address_or_subject: str, config: dict[str, Any]) -> list[str]:
@@ -1034,6 +1117,68 @@ class Store:
                 inserted += int(cursor.rowcount > 0)
         return inserted
 
+    def list_persisted_ibit_news_signals(
+        self,
+        target_id: str,
+        *,
+        lookback_days: int = 90,
+        limit: int = 120,
+    ) -> list[dict[str, Any]]:
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=max(1, int(lookback_days)))).isoformat()
+        rows = self.db.query(
+            """
+            SELECT * FROM btc_news_matches
+            WHERE target_id = ?
+              AND published_at_utc >= ?
+            ORDER BY published_at_utc DESC, confidence DESC, id DESC
+            LIMIT ?
+            """,
+            (target_id, cutoff, max(1, min(int(limit) * 20, 5000))),
+        )
+        by_signal: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            signal = _json_loads(row["signal_json"], {})
+            if not isinstance(signal, dict):
+                signal = {}
+            signal_id = str(signal.get("id") or row["signal_id"] or "").strip()
+            if not signal_id:
+                continue
+            current = by_signal.setdefault(signal_id, dict(signal))
+            current["id"] = current.get("id") or signal_id
+            current["published_at"] = current.get("published_at") or row["published_at_utc"]
+            current["confidence"] = max(_safe_float(current.get("confidence")), _safe_float(row["confidence"]))
+
+            transfer = _json_loads(row["transfer_json"], {})
+            if not isinstance(transfer, dict):
+                transfer = {}
+            asset = str(transfer.get("asset") or ("ETH" if str(transfer.get("chain") or "").lower() == "eth" else "BTC")).upper()
+            address_value = _safe_float(transfer.get("amount"), _safe_float(transfer.get("amount_btc")))
+            match = {
+                "txid": row["txid"],
+                "chain": str(transfer.get("chain") or ("eth" if asset == "ETH" else "btc")).lower(),
+                "asset": asset,
+                "candidate_address": row["candidate_address"],
+                "address_role": row["address_role"],
+                "address_value": address_value,
+                "address_value_btc": address_value if asset == "BTC" else None,
+                "address_value_eth": address_value if asset == "ETH" else None,
+                "confidence": _safe_float(row["confidence"]),
+                "reasons": _json_loads(row["reasons_json"], []),
+                "behavior": "转出" if str(row["address_role"]) in {"source", "input"} else "转入",
+                "source_url": str(transfer.get("source_url") or ""),
+                "transfer": transfer,
+            }
+            current["large_transfer_matches"] = _merge_match_rows(
+                current.get("large_transfer_matches") if isinstance(current.get("large_transfer_matches"), list) else [],
+                [match],
+            )
+            current["candidate_addresses"] = list(dict.fromkeys([*(current.get("candidate_addresses") if isinstance(current.get("candidate_addresses"), list) else []), row["candidate_address"]]))
+            current["txids"] = list(dict.fromkeys([*(current.get("txids") if isinstance(current.get("txids"), list) else []), row["txid"]]))
+            reasons = current.get("reasons") if isinstance(current.get("reasons"), list) else []
+            current["reasons"] = list(dict.fromkeys([*reasons, *_json_loads(row["reasons_json"], [])]))
+
+        return _merge_news_signal_rows(list(by_signal.values()))[: max(1, int(limit))]
+
     def confirm_btc_address_for_target(self, target_id: str, address: str, *, role: str = "candidate", label: str | None = None) -> WhaleTargetOut:
         row = self.db.query_one("SELECT * FROM whale_targets WHERE id = ?", (target_id,))
         if row is None:
@@ -1411,7 +1556,8 @@ class Store:
         strategy_config = strategy.config if strategy is not None else {}
         lookback_days = _safe_int(target.config.get("btc_candidate_retention_days"), _safe_int(strategy_config.get("btc_candidate_retention_days"), 90))
         persisted = self.list_chain_address_operations(addresses, lookback_days=lookback_days, limit_per_address=30)
-        if not persisted:
+        persisted_signals = self.list_persisted_ibit_news_signals(target.id, lookback_days=lookback_days, limit=120)
+        if not persisted and not persisted_signals:
             return snapshot
 
         raw = snapshot.setdefault("raw", {})
@@ -1456,6 +1602,20 @@ class Store:
         news["confirmed_address_activity"] = {**confirmed_activity, **merged_confirmed}
         news["suspected_address_activity"] = {**suspected_activity, **merged_suspected}
 
+        current_signals = news.get("signals") if isinstance(news.get("signals"), list) else []
+        merged_signals = _merge_news_signal_rows(current_signals, persisted_signals)
+        news["signals"] = merged_signals
+        current_suspected = news.get("suspected_addresses") if isinstance(news.get("suspected_addresses"), list) else []
+        rebuilt_suspected = BlackRockFreeAddressBuilder.build_suspected_addresses(
+            merged_signals,
+            candidate_activity={**news["confirmed_address_activity"], **news["suspected_address_activity"]},
+        )
+        news["suspected_addresses"] = _merge_suspected_address_rows(current_suspected, rebuilt_suspected)
+        news["btc_large_transfer_match_count"] = sum(
+            len(signal.get("large_transfer_matches") if isinstance(signal.get("large_transfer_matches"), list) else [])
+            for signal in merged_signals
+        )
+
         account = snapshot.setdefault("account_summary", {})
         if not isinstance(account, dict):
             account = {}
@@ -1463,6 +1623,8 @@ class Store:
         account["blackrock_btc_cluster_address_count"] = len(confirmed_addresses)
         account["blackrock_btc_cluster_operation_count"] = sum(len(rows) for rows in merged_activity.values())
         account["blackrock_btc_cluster_persisted_operation_count"] = sum(len(rows) for rows in persisted.values())
+        account["ibit_news_candidate_count"] = len(merged_signals)
+        account["ibit_suspected_address_count"] = len(news["suspected_addresses"])
         return snapshot
 
     def get_whale_detail(self, target_id: str) -> WhaleDetailOut | None:
