@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -835,3 +836,84 @@ def test_ibit_notification_switches_persist_false_after_strategy_save(tmp_path: 
     assert reloaded.config["blackrock_btc_outflow_notification_enabled"] is False
     assert reloaded.config["ibit_news_candidate_notification_enabled"] is False
     assert reloaded.config["blackrock_etf_flow_notification_enabled"] is False
+
+
+def test_blackrock_detail_rehydrates_address_operations_from_bottom_table(tmp_path: Path) -> None:
+    store = Store(Database(tmp_path / "test.db", "secret"))
+    btc_address = "36YZXcTVLPdyapYuqXdJEt46oMVB2NrzVv"
+    eth_address = "0x1111111111111111111111111111111111111111"
+    now = datetime.now(timezone.utc).isoformat()
+    target = store.upsert_whale_target(
+        WhaleTargetUpsert(
+            id="ibit-free",
+            label="IBIT Free",
+            address_or_subject="IBIT",
+            enabled=True,
+            config={"provider": "blackrock_free_monitor", "btc_addresses": [btc_address, eth_address]},
+        )
+    )
+    store.save_whale_snapshot(
+        target.id,
+        {
+            "account_summary": {"source": "blackrock_free", "blackrock_btc_cluster_operation_count": 0},
+            "raw": {"btc_cluster": {"address_activity": {}}, "news_signals": {}},
+        },
+    )
+    store.upsert_btc_large_transfer(
+        {
+            "txid": "btc-rehydrated-1",
+            "chain": "btc",
+            "asset": "BTC",
+            "block_height": 956900,
+            "block_hash": "btc-block",
+            "block_time_utc": now,
+            "amount": 2265.6855,
+            "amount_btc": 2265.6855,
+            "total_input_amount": 2265.6855,
+            "total_output_amount": 2265.6855,
+            "fee_amount": 0,
+            "total_input_btc": 2265.6855,
+            "total_output_btc": 2265.6855,
+            "fee_btc": 0,
+            "input_addresses": [{"address": btc_address, "value": 2265.6855, "value_btc": 2265.6855}],
+            "output_addresses": [{"address": "bc1counterparty000000000000000000000000000000", "value": 2265.6855, "value_btc": 2265.6855}],
+            "address_operations": [{"address": btc_address, "direction": "out", "behavior": "transfer_out", "amount": 2265.6855, "amount_btc": 2265.6855, "net_btc": -2265.6855}],
+            "exchange_hints": [],
+            "source_url": "https://blockstream.info/tx/btc-rehydrated-1",
+            "raw": {"source": "test"},
+        }
+    )
+    store.upsert_btc_large_transfer(
+        {
+            "txid": "eth-rehydrated-1",
+            "chain": "eth",
+            "asset": "ETH",
+            "block_height": 123456,
+            "block_hash": "eth-block",
+            "block_time_utc": now,
+            "amount": 7546,
+            "amount_btc": 0,
+            "amount_eth": 7546,
+            "total_input_amount": 7546,
+            "total_output_amount": 7546,
+            "fee_amount": 0,
+            "total_input_btc": 0,
+            "total_output_btc": 0,
+            "fee_btc": 0,
+            "input_addresses": [{"address": eth_address, "value": 7546, "value_eth": 7546}],
+            "output_addresses": [{"address": "0x2222222222222222222222222222222222222222", "value": 7546, "value_eth": 7546}],
+            "address_operations": [{"address": eth_address, "direction": "out", "behavior": "transfer_out", "amount": 7546, "amount_eth": 7546, "net_eth": -7546}],
+            "exchange_hints": [],
+            "source_url": "https://etherscan.io/tx/eth-rehydrated-1",
+            "raw": {"source": "test"},
+        }
+    )
+
+    detail = store.get_whale_detail(target.id)
+
+    assert detail is not None
+    activity = detail.snapshot["raw"]["btc_cluster"]["address_activity"]
+    assert activity[btc_address][0]["txid"] == "btc-rehydrated-1"
+    assert activity[eth_address][0]["txid"] == "eth-rehydrated-1"
+    assert activity[eth_address][0]["asset"] == "ETH"
+    assert detail.account_summary["blackrock_btc_cluster_operation_count"] == 2

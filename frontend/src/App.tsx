@@ -1412,6 +1412,9 @@ function BtcAddressDetailCard({
   const raw = detail.snapshot?.raw ?? {};
   const flow = raw.farside && typeof raw.farside === "object" ? raw.farside as Record<string, any> : {};
   const latest = row.operations[0];
+  const latestAsset = latest ? transferAsset(latest) : "BTC";
+  const latestAmount = latest ? transferAmount(latest) : 0;
+  const latestNet = latest ? operationNetAmount(latest) : 0;
   return (
     <div className="btc-address-detail-card">
       <div className="btc-address-detail-card__head">
@@ -1423,8 +1426,8 @@ function BtcAddressDetailCard({
       </div>
       <div className="btc-address-detail-grid">
         <Metric label="最近方向" value={latest ? String(latest.behavior ?? latest.direction ?? "--") : "--"} />
-        <Metric label="最近金额" value={latest ? `${formatNumber(latest.amount_btc, 4)} BTC` : "--"} />
-        <Metric label="最近净额" value={latest ? `${formatNumber(latest.net_btc, 4)} BTC` : "--"} />
+        <Metric label="最近金额" value={latest ? `${formatNumber(latestAmount, 4)} ${latestAsset}` : "--"} />
+        <Metric label="最近净额" value={latest ? `${formatNumber(latestNet, 4)} ${latestAsset}` : "--"} />
         <Metric label="是否确认" value={latest ? (latest.confirmed ? "已确认" : "未确认") : "--"} />
         <Metric label="ETF净流入/流出" value={money(account.blackrock_last_flow_usd)} tone={Number(account.blackrock_last_flow_usd ?? 0) >= 0 ? "up" : "down"} />
         <Metric label="iShares估算持仓" value={account.blackrock_official_estimated_btc == null ? "--" : `${formatNumber(account.blackrock_official_estimated_btc, 2)} BTC`} />
@@ -1450,16 +1453,19 @@ function BtcAddressDetailCard({
 
 function BtcAddressOperationRow({ operation }: { operation: Record<string, any> }) {
   const counterparties = btcCounterpartyText(operation);
+  const asset = transferAsset(operation);
+  const amount = transferAmount(operation);
+  const net = operationNetAmount(operation);
   return (
     <div className="btc-address-op-row">
       <strong>{cnDateFromAny(operation.timestamp ?? operation.timestamp_ms)}</strong>
       <span>{String(operation.behavior ?? operation.direction ?? "--")}</span>
-      <span>{formatNumber(operation.amount_btc, 4)} BTC</span>
-      <span>净额 {formatNumber(operation.net_btc, 4)} BTC</span>
+      <span>{formatNumber(amount, 4)} {asset}</span>
+      <span>净额 {formatNumber(net, 4)} {asset}</span>
       <span>{operation.confirmed ? "已确认" : "未确认"}</span>
       <small title={String(operation.txid ?? "")}>txid {shortText(operation.txid, 12)}</small>
       {counterparties && <small title={counterparties}>对手方 {counterparties}</small>}
-      {operation.source_url && <a href={String(operation.source_url)} target="_blank" rel="noreferrer">Blockstream</a>}
+      {operation.source_url && <a href={String(operation.source_url)} target="_blank" rel="noreferrer">{transferExplorerLabel(operation)}</a>}
     </div>
   );
 }
@@ -1500,7 +1506,7 @@ function IbitBtcAddressPanel({
     }
     subscribe.mutate(row);
   };
-  const title = mode === "confirmed" ? "BTC链订阅" : "疑似地址";
+  const title = mode === "confirmed" ? "链上地址订阅" : "疑似地址";
   const operationCount = rows.reduce((sum, row) => sum + row.operations.length, 0);
   return (
     <Panel title={title} dragHandle={false}>
@@ -1524,7 +1530,7 @@ function IbitBtcAddressPanel({
                 <em className={row.role === "confirmed" ? "status on" : "status off"}>{row.role === "confirmed" ? "已订阅" : "疑似"}</em>
                 <span>{row.operations.length} 笔底单</span>
                 <span>{row.signals.length} 条新闻</span>
-                <span>{latest ? `${cnDateFromAny(latest.timestamp ?? latest.timestamp_ms)} · ${String(latest.behavior ?? latest.direction ?? "--")} ${formatNumber(latest.amount_btc, 4)} BTC` : "暂无操作"}</span>
+                <span>{latest ? `${cnDateFromAny(latest.timestamp ?? latest.timestamp_ms)} · ${String(latest.behavior ?? latest.direction ?? "--")} ${formatNumber(transferAmount(latest), 4)} ${transferAsset(latest)}` : "暂无操作"}</span>
                 <span>{row.confidence ? `置信度 ${formatNumber(row.confidence * 100, 0)}%` : "手动/配置"}</span>
               </button>
               {expanded && (
@@ -2331,9 +2337,21 @@ function transferAsset(transfer: Partial<BtcLargeTransfer> | Record<string, any>
 }
 
 function transferAmount(transfer: Partial<BtcLargeTransfer> | Record<string, any>) {
-  const value = Number(transfer.amount ?? 0);
+  const row = transfer as Record<string, any>;
+  const value = Number(row.amount ?? 0);
   if (Number.isFinite(value) && value > 0) return value;
-  return Number(transfer.amount_btc ?? 0);
+  const eth = Number(row.amount_eth ?? 0);
+  if (Number.isFinite(eth) && eth > 0) return eth;
+  return Number(row.amount_btc ?? 0);
+}
+
+function operationNetAmount(operation: Record<string, any>) {
+  const generic = Number(operation.net_amount ?? 0);
+  if (Number.isFinite(generic) && generic !== 0) return generic;
+  const asset = transferAsset(operation);
+  const exact = Number(operation[`net_${asset.toLowerCase()}`] ?? 0);
+  if (Number.isFinite(exact) && exact !== 0) return exact;
+  return transferAmount(operation);
 }
 
 function transferAmountText(transfer: Partial<BtcLargeTransfer> | Record<string, any>, digits = 4) {

@@ -74,6 +74,69 @@ def _safe_float(value: Any, fallback: float = 0.0) -> float:
         return fallback
 
 
+def _timestamp_ms(value: Any) -> int:
+    text = str(value or "").strip()
+    if not text:
+        return 0
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return 0
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return int(parsed.astimezone(timezone.utc).timestamp() * 1000)
+
+
+def _address_key(value: Any) -> str:
+    return str(value or "").strip().lower()
+
+
+def _operation_key(operation: dict[str, Any]) -> str:
+    return ":".join(
+        [
+            str(operation.get("txid") or ""),
+            str(operation.get("chain") or ""),
+            str(operation.get("asset") or ""),
+            str(operation.get("direction") or operation.get("behavior") or ""),
+            str(operation.get("amount") or operation.get("amount_btc") or operation.get("amount_eth") or ""),
+        ]
+    )
+
+
+def _merge_operation_rows(*groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows: dict[str, dict[str, Any]] = {}
+    for group in groups:
+        for item in group:
+            if not isinstance(item, dict):
+                continue
+            key = _operation_key(item)
+            if key.strip(":"):
+                rows[key] = item
+    return sorted(rows.values(), key=lambda item: _safe_int(item.get("timestamp_ms")), reverse=True)
+
+
+def _configured_chain_addresses(address_or_subject: str, config: dict[str, Any]) -> list[str]:
+    values = list(extract_addresses(address_or_subject))
+    for match in re.finditer(r"\b(?:bc1[ac-hj-np-z02-9]{11,87}|[13][a-km-zA-HJ-NP-Z1-9]{25,34})\b", address_or_subject or "", re.IGNORECASE):
+        values.append(match.group(0))
+    for key in ("btc_addresses", "suspected_btc_addresses", "candidate_btc_addresses"):
+        raw = config.get(key)
+        if not isinstance(raw, list):
+            continue
+        for item in raw:
+            text = str(item or "").strip()
+            if text:
+                values.append(text)
+    unique: dict[str, str] = {}
+    for value in values:
+        key = _address_key(value)
+        if key and key not in unique:
+            unique[key] = value
+    return list(unique.values())
+
+
 MODULE_LAYOUT_DEFAULTS: dict[str, dict[str, int]] = {
     "charts": {"x": 0, "y": 0, "w": 12, "h": 16},
     "whale": {"x": 0, "y": 16, "w": 12, "h": 8},
@@ -784,6 +847,93 @@ class Store:
             return None
         return self._btc_transfer_from_row(row, include_matches=True)
 
+    def list_chain_address_operations(
+        self,
+        addresses: list[str],
+        *,
+        lookback_days: int = 90,
+        limit_per_address: int = 30,
+    ) -> dict[str, list[dict[str, Any]]]:
+        normalized: dict[str, str] = {}
+        for address in addresses:
+            text = str(address or "").strip()
+            key = _address_key(text)
+            if key and key not in normalized:
+                normalized[key] = text
+        if not normalized:
+            return {}
+
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=max(1, int(lookback_days)))).isoformat()
+        address_tokens = list(normalized.values())[:200]
+        clauses: list[str] = []
+        params: list[Any] = [cutoff]
+        for address in address_tokens:
+            token_values = {address, address.lower()}
+            for token in token_values:
+                like = f"%{token}%"
+                clauses.append("(address_operations_json LIKE ? OR input_addresses_json LIKE ? OR output_addresses_json LIKE ?)")
+                params.extend([like, like, like])
+        if not clauses:
+            return {}
+
+        row_limit = max(100, min(5000, len(address_tokens) * max(1, int(limit_per_address)) * 4))
+        rows = self.db.query(
+            f"""
+            SELECT btc_large_transfers.*,
+                   (SELECT COUNT(*) FROM btc_news_matches WHERE btc_news_matches.txid = btc_large_transfers.txid) AS match_count
+            FROM btc_large_transfers
+            WHERE block_time_utc >= ?
+              AND ({" OR ".join(clauses)})
+            ORDER BY block_time_utc DESC, amount DESC
+            LIMIT ?
+            """,
+            (*params, row_limit),
+        )
+
+        result: dict[str, list[dict[str, Any]]] = {address: [] for address in normalized.values()}
+        for row in rows:
+            transfer = self._btc_transfer_from_row(row, include_matches=False)
+            asset = str(transfer.asset or "BTC").upper()
+            chain = str(transfer.chain or ("eth" if asset == "ETH" else "btc")).lower()
+            input_addresses = transfer.input_addresses
+            output_addresses = transfer.output_addresses
+            timestamp_ms = _timestamp_ms(transfer.block_time_utc)
+            for operation in transfer.address_operations:
+                if not isinstance(operation, dict):
+                    continue
+                original = normalized.get(_address_key(operation.get("address")))
+                if not original:
+                    continue
+                item = dict(operation)
+                amount = _safe_float(item.get("amount"), _safe_float(item.get("amount_btc"), _safe_float(item.get("amount_eth"), transfer.amount)))
+                item["address"] = str(operation.get("address") or original)
+                item["txid"] = transfer.txid
+                item["chain"] = chain
+                item["asset"] = asset
+                item["amount"] = amount
+                if asset == "ETH":
+                    item["amount_eth"] = _safe_float(item.get("amount_eth"), amount)
+                    item.setdefault("net_eth", item.get("amount_eth"))
+                else:
+                    item["amount_btc"] = _safe_float(item.get("amount_btc"), amount)
+                    item.setdefault("net_btc", item.get("amount_btc"))
+                item["block_height"] = transfer.block_height
+                item["block_hash"] = transfer.block_hash
+                item["timestamp"] = transfer.block_time_utc
+                item["timestamp_ms"] = _safe_int(item.get("timestamp_ms"), timestamp_ms)
+                item["source_url"] = transfer.source_url
+                item["confirmed"] = True
+                item["input_counterparties"] = [entry for entry in input_addresses if _address_key(entry.get("address")) != _address_key(original)][:20]
+                item["output_counterparties"] = [entry for entry in output_addresses if _address_key(entry.get("address")) != _address_key(original)][:20]
+                item["from_persisted_bottom_table"] = True
+                result[original].append(item)
+
+        return {
+            address: _merge_operation_rows(rows)[: max(1, int(limit_per_address))]
+            for address, rows in result.items()
+            if rows
+        }
+
     def btc_large_transfer_stats(self, *, min_btc: float = 500.0, min_eth: float = 5000.0) -> BtcLargeTransferStatsOut:
         today = datetime.now(timezone.utc).date().isoformat()
         total = self.db.query_one("SELECT COUNT(*) AS count FROM btc_large_transfers")
@@ -1249,6 +1399,72 @@ class Store:
             (int(ok), None if ok else (error or "")[:1000], event_id),
         )
 
+    def _enrich_ibit_snapshot_from_bottom_table(self, target: WhaleTargetOut, snapshot: dict[str, Any]) -> dict[str, Any]:
+        if str(target.config.get("provider") or "").strip().lower() != "blackrock_free_monitor":
+            return snapshot
+        addresses = _configured_chain_addresses(target.address_or_subject, target.config)
+        if not addresses:
+            return snapshot
+        confirmed_addresses = _configured_chain_addresses(target.address_or_subject, {"btc_addresses": target.config.get("btc_addresses", [])})
+
+        strategy = self.get_strategy("whale")
+        strategy_config = strategy.config if strategy is not None else {}
+        lookback_days = _safe_int(target.config.get("btc_candidate_retention_days"), _safe_int(strategy_config.get("btc_candidate_retention_days"), 90))
+        persisted = self.list_chain_address_operations(addresses, lookback_days=lookback_days, limit_per_address=30)
+        if not persisted:
+            return snapshot
+
+        raw = snapshot.setdefault("raw", {})
+        if not isinstance(raw, dict):
+            raw = {}
+            snapshot["raw"] = raw
+        cluster = raw.setdefault("btc_cluster", {})
+        if not isinstance(cluster, dict):
+            cluster = {}
+            raw["btc_cluster"] = cluster
+        news = raw.setdefault("news_signals", {})
+        if not isinstance(news, dict):
+            news = {}
+            raw["news_signals"] = news
+
+        cluster_addresses = cluster.get("addresses") if isinstance(cluster.get("addresses"), list) else []
+        cluster["addresses"] = list(dict.fromkeys([*cluster_addresses, *confirmed_addresses]))
+
+        activity = cluster.get("address_activity") if isinstance(cluster.get("address_activity"), dict) else {}
+        confirmed_activity = news.get("confirmed_address_activity") if isinstance(news.get("confirmed_address_activity"), dict) else {}
+        suspected_activity = news.get("suspected_address_activity") if isinstance(news.get("suspected_address_activity"), dict) else {}
+        merged_activity: dict[str, list[dict[str, Any]]] = {}
+        merged_confirmed: dict[str, list[dict[str, Any]]] = {}
+        merged_suspected: dict[str, list[dict[str, Any]]] = {}
+
+        def existing_rows(source: dict[str, Any], address: str) -> list[dict[str, Any]]:
+            for key, value in source.items():
+                if _address_key(key) == _address_key(address) and isinstance(value, list):
+                    return [item for item in value if isinstance(item, dict)]
+            return []
+
+        for address, operations in persisted.items():
+            merged = _merge_operation_rows(existing_rows(activity, address), operations)
+            merged_activity[address] = merged
+            merged_confirmed[address] = _merge_operation_rows(existing_rows(confirmed_activity, address), operations)
+            merged_suspected[address] = _merge_operation_rows(existing_rows(suspected_activity, address), operations)
+
+        for key, value in activity.items():
+            if isinstance(value, list) and not any(_address_key(key) == _address_key(address) for address in merged_activity):
+                merged_activity[str(key)] = [item for item in value if isinstance(item, dict)]
+        cluster["address_activity"] = merged_activity
+        news["confirmed_address_activity"] = {**confirmed_activity, **merged_confirmed}
+        news["suspected_address_activity"] = {**suspected_activity, **merged_suspected}
+
+        account = snapshot.setdefault("account_summary", {})
+        if not isinstance(account, dict):
+            account = {}
+            snapshot["account_summary"] = account
+        account["blackrock_btc_cluster_address_count"] = len(confirmed_addresses)
+        account["blackrock_btc_cluster_operation_count"] = sum(len(rows) for rows in merged_activity.values())
+        account["blackrock_btc_cluster_persisted_operation_count"] = sum(len(rows) for rows in persisted.values())
+        return snapshot
+
     def get_whale_detail(self, target_id: str) -> WhaleDetailOut | None:
         target = self.get_whale_target(target_id)
         if target is None:
@@ -1275,18 +1491,22 @@ class Store:
         ]
         config = target.config
         snapshot = self.get_whale_snapshot(target_id)
+        snapshot = self._enrich_ibit_snapshot_from_bottom_table(target, snapshot)
+        def list_field(name: str) -> list[dict[str, Any]]:
+            return list(snapshot.get(name) or config.get(name) or [])
+
         return WhaleDetailOut(
             target=target,
             recent_events=recent_events,
-            positions=list(snapshot.get("positions") or config.get("positions", [])),
-            holdings=list(snapshot.get("holdings") or config.get("holdings", [])),
-            defi_positions=list(snapshot.get("defi_positions") or config.get("defi_positions", [])),
-            open_orders=list(snapshot.get("open_orders") or config.get("open_orders", [])),
-            fills=list(snapshot.get("fills") or config.get("fills", [])),
-            historical_orders=list(snapshot.get("historical_orders") or config.get("historical_orders", [])),
-            funding=list(snapshot.get("funding") or config.get("funding", [])),
-            ledger_updates=list(snapshot.get("ledger_updates") or config.get("ledger_updates", [])),
-            portfolio=list(snapshot.get("portfolio") or config.get("portfolio", [])),
+            positions=list_field("positions"),
+            holdings=list_field("holdings"),
+            defi_positions=list_field("defi_positions"),
+            open_orders=list_field("open_orders"),
+            fills=list_field("fills"),
+            historical_orders=list_field("historical_orders"),
+            funding=list_field("funding"),
+            ledger_updates=list_field("ledger_updates"),
+            portfolio=list_field("portfolio"),
             account_summary=dict(snapshot.get("account_summary") or config.get("account_summary", {})),
             snapshot=snapshot,
             updated_at=str(snapshot.get("updated_at")) if snapshot.get("updated_at") else None,
