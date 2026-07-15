@@ -45,6 +45,53 @@ def test_strategy_update_hot_config(tmp_path: Path) -> None:
     assert updated.config["stddev"] == 2.5
 
 
+def test_technical_strategy_notification_symbol_defaults_and_empty_selection(tmp_path: Path) -> None:
+    database_path = tmp_path / "test.db"
+    store = Store(Database(database_path, "secret"))
+    for strategy_id in ("kdj", "ma", "boll"):
+        strategy = store.get_strategy(strategy_id)
+        assert strategy is not None
+        assert strategy.config["notify_symbols"] == strategy.config["symbols"]
+
+    strategy = store.get_strategy("boll_ma_cross")
+    assert strategy is not None
+    assert strategy.enabled is True
+    assert strategy.notifier_id is None
+    assert strategy.config["boll_period"] == 20
+    assert strategy.config["ma_period"] == 99
+    assert strategy.config["notify_symbols"] == strategy.config["symbols"]
+
+    updated = store.update_strategy(
+        "boll_ma_cross",
+        True,
+        {**strategy.config, "notify_symbols": []},
+        None,
+    )
+    assert updated.config["notify_symbols"] == []
+    assert updated.notifier_id is None
+
+    store.db.close()
+    reopened = Store(Database(database_path, "secret"))
+    persisted = reopened.get_strategy("boll_ma_cross")
+    assert persisted is not None
+    assert persisted.config["notify_symbols"] == []
+
+
+def test_legacy_technical_strategy_migrates_notification_symbols(tmp_path: Path) -> None:
+    database_path = tmp_path / "test.db"
+    store = Store(Database(database_path, "secret"))
+    strategy = store.get_strategy("kdj")
+    assert strategy is not None
+    legacy_config = {key: value for key, value in strategy.config.items() if key != "notify_symbols"}
+    store.update_strategy("kdj", True, legacy_config, strategy.notifier_id)
+    store.db.close()
+
+    migrated_store = Store(Database(database_path, "secret"))
+    migrated = migrated_store.get_strategy("kdj")
+    assert migrated is not None
+    assert migrated.config["notify_symbols"] == migrated.config["symbols"]
+
+
 def test_default_alerts_module_stays_in_layout(tmp_path: Path) -> None:
     store = Store(Database(tmp_path / "test.db", "secret"))
     assert any(item["i"] == "alerts" for item in store.get_layout().layout)

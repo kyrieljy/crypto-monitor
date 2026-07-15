@@ -1,6 +1,6 @@
 # Project Context
 
-更新日期：2026-05-26
+更新日期：2026-07-15
 
 ## 项目目标
 
@@ -68,7 +68,8 @@
 - 默认关注：`BTCUSDT`、`ETHUSDT`、`SOLUSDT`、`BNBUSDT`、`ZECUSDT`。
 - 行情源支持 Binance Futures 主源和 OKX 灾备。
 - 前台最近告警和行情工具条显示来源，例如“币安 Futures 优先，OKX 备用”“主源 币安”“灾备 OKX”。
-- KDJ、MA、BOLL 都已接入 worker、前台展示、后台配置和机器人模板。
+- KDJ、MA、BOLL 以及 BOLL 中轨/MA 交叉策略都已接入 worker、前台展示、后台配置和机器人模板。
+- 技术策略使用独立的 `notify_symbols` 控制机器人提醒币种；未选币种仍保留前台告警。
 - 机器人提醒已移除“K线时间”字段。
 - BOLL 机器人提醒顺序为上轨、中轨、下轨。
 - 策略卡片点击后弹窗显示明细，包含 KDJ 值、MA 值、BOLL 上中下轨、当前价/收盘价、数据源、提醒时间等。
@@ -76,7 +77,7 @@
 ### K 线图和布局
 
 - 前台标题为 `Crypto Monitor`。
-- ETH K 线大图置顶放大，右侧显示 ETH 的 KDJ/MA/BOLL 预警。
+- ETH K 线大图置顶放大，右侧显示 ETH 的 KDJ/MA/BOLL 预警；BOLL 区域同时汇总轨道突破和中轨/MA 交叉。
 - 其余四个币种在下方按原样并排展示。
 - ETH 大图支持 MA/BOLL/KDJ 指标线切换。
 - 默认只显示 MA 组，包含 MA7、MA25、MA99。

@@ -1,6 +1,6 @@
 # Architecture
 
-更新日期：2026-05-26
+更新日期：2026-07-15
 
 ## 总览
 
@@ -111,7 +111,7 @@ shutdown 时会取消这些任务并关闭数据库连接。
 业务配置都存 SQLite 并由后台页面管理：
 
 - 币种
-- KDJ/MA/BOLL 参数
+- KDJ/MA/BOLL/BOLL中轨-MA交叉参数及各策略机器人提醒币种
 - 新闻源
 - 翻译配置
 - 清理策略
@@ -126,7 +126,7 @@ shutdown 时会取消这些任务并关闭数据库连接。
 核心表：
 
 - `symbols`：关注币种。
-- `strategy_configs`：策略配置，包括 `kdj`、`ma`、`boll`、`trump_social`、`whitehouse`、`translation`、`cleanup`、`whale`。
+- `strategy_configs`：策略配置，包括 `kdj`、`ma`、`boll`、`boll_ma_cross`、`trump_social`、`whitehouse`、`translation`、`cleanup`、`whale`。
 - `notifier_targets`：机器人目标，含飞书/Telegram 敏感字段密文。
 - `strategy_notifier_bindings`：策略和机器人绑定。
 - `dashboard_modules`：模块开关、标题、模块级配置。
@@ -212,6 +212,9 @@ shutdown 时会取消这些任务并关闭数据库连接。
 - KDJ：J 上穿/下穿 K。
 - MA：快慢均线穿越，当前主要是 MA25/MA99，图表也显示 MA7。
 - BOLL：收盘价上穿上轨或下穿下轨。
+- BOLL中轨/MA：BOLL 中轨首次上穿或下穿指定 MA，默认 BOLL(20) 与 MA(99)。
+
+技术策略的 `symbols` 决定前台监控范围，`notify_symbols` 只决定机器人推送范围；显式空数组表示该策略不推送任何币种。
 
 策略事件进入 `alert_events`。通知 worker 根据绑定关系发送到机器人。
 

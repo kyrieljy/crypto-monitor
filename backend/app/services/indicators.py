@@ -101,6 +101,14 @@ def detect_ma_cross(previous_fast: float, previous_slow: float, current_fast: fl
     return None
 
 
+def detect_boll_middle_ma_cross(previous_middle: float, previous_ma: float, current_middle: float, current_ma: float) -> str | None:
+    if previous_middle <= previous_ma and current_middle > current_ma:
+        return "BOLL_MIDDLE_CROSS_ABOVE_MA"
+    if previous_middle >= previous_ma and current_middle < current_ma:
+        return "BOLL_MIDDLE_CROSS_BELOW_MA"
+    return None
+
+
 def detect_boll_break(previous: BollPoint, current: BollPoint) -> str | None:
     if previous.close <= previous.upper and current.close > current.upper:
         return "BOLL_CROSS_ABOVE_UPPER"

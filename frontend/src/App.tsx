@@ -44,6 +44,7 @@ import type {
   Snapshot,
   SourceHealth,
   StrategyConfig,
+  SymbolItem,
   ThemeMode,
   WhaleAddressCandidate,
   WhaleDetail,
@@ -77,8 +78,9 @@ const DATA_SOURCE_OPTIONS = [
   { value: "binance_only", label: "币安 Futures" }
 ];
 const WHALE_TAG_OPTIONS = ["聪明钱", "巨鲸", "KOL", "机构", "做市商", "交易员", "重点关注"];
+const TECHNICAL_STRATEGY_IDS = new Set(["kdj", "ma", "boll", "boll_ma_cross"]);
 const STRATEGY_GROUPS = [
-  { title: "技术策略", ids: ["boll", "kdj", "ma"] },
+  { title: "技术策略", ids: ["boll", "boll_ma_cross", "kdj", "ma"] },
   { title: "巨鲸", ids: ["whale"], whaleTargets: true },
   { title: "社媒和新闻", ids: ["trump_social", "whitehouse"] },
   { title: "翻译和清理", ids: ["translation", "cleanup"] }
@@ -87,6 +89,12 @@ const THEME_STORAGE_KEY = "cryptoMonitorTheme";
 const DASHBOARD_LAYOUT_STORAGE_KEY = "cryptoMonitorDashboardLayout";
 const INDICATOR_MODE_STORAGE_KEY = "cryptoMonitorIndicatorMode";
 type IndicatorMode = "ma" | "boll" | "kdj";
+
+const ALERT_GROUPS = [
+  { id: "kdj", label: "KDJ", strategyIds: ["kdj"] },
+  { id: "ma", label: "MA", strategyIds: ["ma"] },
+  { id: "boll", label: "BOLL", strategyIds: ["boll", "boll_ma_cross"] }
+] as const;
 
 type DashboardControls = {
   chartInterval: string;
@@ -770,29 +778,24 @@ function CoinAlertStack({
   collapsedHeight?: number;
   className?: string;
 }) {
-  const groups = [
-    ["kdj", "KDJ"],
-    ["ma", "MA"],
-    ["boll", "BOLL"]
-  ] as const;
   const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>({});
   const [selectedAlert, setSelectedAlert] = useState<AlertEvent | null>(null);
   return (
     <div className={className ? `coin-alerts ${className}` : "coin-alerts"}>
-      {groups.map(([strategyId, label]) => {
-        const selectedInterval = strategyIntervals[strategyId] ?? "15m";
-        const groupKey = `${strategyId}:${selectedInterval}`;
+      {ALERT_GROUPS.map((group) => {
+        const selectedInterval = strategyIntervals[group.id] ?? "15m";
+        const groupKey = `${group.id}:${selectedInterval}`;
         const allItems = alerts
-          .filter((alert) => alert.strategy_id === strategyId && alert.interval === selectedInterval)
+          .filter((alert) => group.strategyIds.some((strategyId) => alert.strategy_id === strategyId) && alert.interval === selectedInterval)
           .sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at));
         const canExpand = allItems.length > 3;
         const isExpanded = canExpand && Boolean(expandedGroups[groupKey]);
         const items = allItems.slice(0, isExpanded ? 10 : 3);
         return (
           <CoinAlertGroup
-            key={strategyId}
-            strategyId={strategyId}
-            label={label}
+            key={group.id}
+            strategyId={group.id}
+            label={group.label}
             selectedInterval={selectedInterval}
             items={items}
             canExpand={canExpand}
@@ -935,6 +938,11 @@ function formatCoinAlert(alert: AlertEvent) {
 }
 
 function alertSignalLabel(alert: AlertEvent) {
+  if (alert.signal === "BOLL_MIDDLE_CROSS_ABOVE_MA" || alert.signal === "BOLL_MIDDLE_CROSS_BELOW_MA") {
+    const maPeriod = positiveInt(alert.detail?.ma_period, 99);
+    const direction = alert.signal === "BOLL_MIDDLE_CROSS_ABOVE_MA" ? "上穿" : "下穿";
+    return `BOLL中轨${direction}MA${maPeriod}`;
+  }
   const signalLabels: Record<string, string> = {
     J_CROSS_ABOVE_K: "J上穿K",
     J_CROSS_BELOW_K: "J下穿K",
@@ -966,6 +974,14 @@ function alertMetricRows(alert: AlertEvent): AlertDetailRow[] {
       { label: "BOLL 上轨", value: formatIndicatorValue(detail.upper), emphasis: true },
       { label: "BOLL 中轨", value: formatIndicatorValue(detail.middle), emphasis: true },
       { label: "BOLL 下轨", value: formatIndicatorValue(detail.lower), emphasis: true }
+    ];
+  }
+  if (alert.strategy_id === "boll_ma_cross") {
+    const bollPeriod = positiveInt(detail.boll_period, 20);
+    const maPeriod = positiveInt(detail.ma_period, 99);
+    return [
+      { label: `BOLL 中轨(${bollPeriod})`, value: formatIndicatorValue(detail.boll_middle), emphasis: true },
+      { label: `MA${maPeriod}`, value: formatIndicatorValue(detail.ma), emphasis: true }
     ];
   }
   return Object.entries(detail).map(([label, value]) => ({ label, value: formatIndicatorValue(value) }));
@@ -2886,6 +2902,7 @@ function AdminContent({
                     <StrategyEditor
                       key={strategy.id}
                       strategy={strategy}
+                      symbols={symbols}
                       notifiers={notifiers}
                       whaleTargets={notifierWhaleTargets}
                       setNotice={setNotice}
@@ -3231,6 +3248,7 @@ function WhaleTargetManager({ setNotice, embedded = false }: { setNotice: (notic
 
 function StrategyEditor({
   strategy,
+  symbols,
   notifiers,
   whaleTargets,
   setNotice,
@@ -3239,6 +3257,7 @@ function StrategyEditor({
   disabled
 }: {
   strategy: MutableStrategy;
+  symbols: SymbolItem[];
   notifiers: NotifierTarget[];
   whaleTargets: WhaleTarget[];
   setNotice: (notice: string) => void;
@@ -3249,9 +3268,16 @@ function StrategyEditor({
   const config = strategy.config;
   const setConfig = (patch: Record<string, unknown>) => onChange({ ...strategy, config: { ...config, ...patch } });
   const canBindNotifier = strategy.id !== "translation" && strategy.id !== "cleanup";
-  const hasReminderIntervals = strategy.id === "kdj" || strategy.id === "ma" || strategy.id === "boll";
+  const hasReminderIntervals = TECHNICAL_STRATEGY_IDS.has(strategy.id);
   const configuredIntervals = arr(config.intervals);
   const reminderIntervals = strategy.id === "ma" && !configuredIntervals.length ? [String(config.interval ?? "1d")] : configuredIntervals;
+  const enabledSymbolIds = symbols.filter((symbol) => symbol.enabled).map((symbol) => symbol.symbol);
+  const legacySymbols = arr(config.symbols);
+  const reminderSymbols = Array.isArray(config.notify_symbols)
+    ? arr(config.notify_symbols)
+    : legacySymbols.length
+      ? legacySymbols
+      : enabledSymbolIds;
   const setReminderIntervals = (intervals: string[]) => {
     if (strategy.id === "ma") {
       setConfig({ intervals, interval: intervals[0] ?? config.interval ?? "1d" });
@@ -3288,6 +3314,13 @@ function StrategyEditor({
       {hasReminderIntervals && (
         <div className="strategy-reminder-top">
           <IntervalMultiSelect label="机器人提醒周期" value={reminderIntervals} onChange={setReminderIntervals} />
+          <SymbolMultiSelect
+            label="机器人提醒币种"
+            symbols={symbols}
+            value={reminderSymbols}
+            onChange={(notify_symbols) => setConfig({ notify_symbols })}
+          />
+          {!reminderSymbols.length && <span className="hint">当前未选择提醒币种：前台仍显示告警，机器人不会推送该策略。</span>}
         </div>
       )}
       <div className="form-grid">
@@ -3315,6 +3348,15 @@ function StrategyEditor({
             <SelectField label="数据源" value={String(config.data_source ?? "okx_only")} options={DATA_SOURCE_OPTIONS} onChange={(data_source) => setConfig({ data_source })} />
             <Switch checked={Boolean(config.alert_on_live_candle)} onChange={(alert_on_live_candle) => setConfig({ alert_on_live_candle })} label="实时 K 线" />
             <span className="hint">默认按闭合 K 线判断；开启实时 K 线后使用当前未闭合 K 线。</span>
+          </>
+        )}
+        {strategy.id === "boll_ma_cross" && (
+          <>
+            <NumberField label="BOLL 长度" value={config.boll_period ?? 20} onChange={(boll_period) => setConfig({ boll_period })} />
+            <NumberField label="MA 周期" value={config.ma_period ?? 99} onChange={(ma_period) => setConfig({ ma_period })} />
+            <SelectField label="数据源" value={String(config.data_source ?? "okx_only")} options={DATA_SOURCE_OPTIONS} onChange={(data_source) => setConfig({ data_source })} />
+            <Switch checked={Boolean(config.alert_on_live_candle)} onChange={(alert_on_live_candle) => setConfig({ alert_on_live_candle })} label="实时 K 线" />
+            <span className="hint">检测 BOLL 中轨与 MA 的首次上穿/下穿；默认按闭合 K 线判断。</span>
           </>
         )}
         {strategy.id === "trump_social" && (
@@ -3879,6 +3921,40 @@ function IntervalMultiSelect({ label, value, onChange }: { label: string; value:
               }}
             />
             <span>{interval}</span>
+          </label>
+        ))}
+      </div>
+    </fieldset>
+  );
+}
+
+function SymbolMultiSelect({
+  label,
+  symbols,
+  value,
+  onChange
+}: {
+  label: string;
+  symbols: SymbolItem[];
+  value: string[];
+  onChange: (value: string[]) => void;
+}) {
+  return (
+    <fieldset className="field check-group">
+      <legend>{label}</legend>
+      <div>
+        {symbols.map((symbol) => (
+          <label key={symbol.symbol} title={symbol.enabled ? symbol.symbol : `${symbol.symbol} 已在币种管理中停用`}>
+            <input
+              type="checkbox"
+              checked={value.includes(symbol.symbol)}
+              disabled={!symbol.enabled}
+              onChange={(event) => {
+                const next = event.target.checked ? [...value, symbol.symbol] : value.filter((item) => item !== symbol.symbol);
+                onChange(symbols.map((item) => item.symbol).filter((item) => next.includes(item)));
+              }}
+            />
+            <span>{symbol.display_name || symbol.symbol}</span>
           </label>
         ))}
       </div>

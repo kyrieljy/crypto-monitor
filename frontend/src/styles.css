@@ -1189,6 +1189,7 @@ select:focus {
 }
 
 .dot.boll,
+.dot.boll_ma_cross,
 .dot.ok {
   background: var(--accent);
 }
@@ -1926,6 +1927,8 @@ select:focus {
 }
 
 .strategy-reminder-top {
+  display: grid;
+  gap: 10px;
   margin-bottom: 12px;
 }
 

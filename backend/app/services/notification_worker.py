@@ -200,6 +200,18 @@ def format_alert_notification(row: Any, strategy_config: dict[str, Any] | None =
             f"BOLL中轨: {_format_number(detail.get('middle'))}",
             f"BOLL下轨: {_format_number(detail.get('lower'))}",
         ]
+    elif strategy_id == "boll_ma_cross":
+        boll_period = int(detail.get("boll_period") or config.get("boll_period", 20))
+        ma_period = int(detail.get("ma_period") or config.get("ma_period", 99))
+        direction = "上穿" if row["signal"] == "BOLL_MIDDLE_CROSS_ABOVE_MA" else "下穿"
+        lines = [
+            "[BOLL中轨/MA预警]",
+            *common,
+            f"信号: BOLL中轨{direction}MA{ma_period}",
+            f"收盘价: {_format_number(row['close_price'])}",
+            f"BOLL中轨({boll_period}): {_format_number(detail.get('boll_middle'))}",
+            f"MA{ma_period}: {_format_number(detail.get('ma'))}",
+        ]
     else:
         lines = [
             f"[{strategy_id.upper()}预警]",

@@ -18,6 +18,7 @@ export const strategyLabels: Record<string, string> = {
   kdj: "KDJ",
   ma: "MA",
   boll: "BOLL",
+  boll_ma_cross: "BOLL中轨/MA",
   trump_social: "特朗普社媒",
   whitehouse: "白宫发言",
   whale: "巨鲸",

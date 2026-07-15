@@ -181,6 +181,30 @@ def test_boll_notification_template_includes_bands() -> None:
     assert "数据源: 灾备 (okx_swap)" in message
 
 
+def test_boll_middle_ma_notification_template_uses_event_periods() -> None:
+    row = {
+        "strategy_id": "boll_ma_cross",
+        "symbol": "ETHUSDT",
+        "interval": "1h",
+        "signal": "BOLL_MIDDLE_CROSS_ABOVE_MA",
+        "detail_json": json.dumps({"boll_middle": 2500.125, "ma": 2499.75, "boll_period": 20, "ma_period": 99}),
+        "candle_open_time_ms": 1779674400000,
+        "close_price": 2510.5,
+        "source": "binance_futures",
+        "source_role": "PRIMARY",
+        "created_at": "2026-05-25T02:00:05+00:00",
+    }
+
+    message = format_alert_notification(row, {"boll_period": 30, "ma_period": 120})
+
+    assert message.startswith("[BOLL中轨/MA预警]\n")
+    assert "信号: BOLL中轨上穿MA99" in message
+    assert "BOLL中轨(20): 2500.1250" in message
+    assert "MA99: 2499.7500" in message
+    assert "K线时间" not in message
+    assert "数据源: 主源 (binance_futures)" in message
+
+
 def test_news_notification_template_uses_module_title() -> None:
     row = {
         "source_type": "social",
