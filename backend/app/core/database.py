@@ -350,6 +350,7 @@ class Database:
                 {
                     "symbols": DEFAULT_SYMBOLS,
                     "notify_symbols": DEFAULT_SYMBOLS,
+                    "notify_intervals_by_symbol": {symbol: ["5m", "15m", "1h"] for symbol in DEFAULT_SYMBOLS},
                     "intervals": ["5m", "15m", "1h"],
                     "period": 26,
                     "k_smoothing": 20,
@@ -368,6 +369,7 @@ class Database:
                 {
                     "symbols": DEFAULT_SYMBOLS,
                     "notify_symbols": DEFAULT_SYMBOLS,
+                    "notify_intervals_by_symbol": {symbol: ["1d"] for symbol in DEFAULT_SYMBOLS},
                     "interval": "1d",
                     "fast_period": 25,
                     "slow_period": 99,
@@ -385,6 +387,7 @@ class Database:
                 {
                     "symbols": DEFAULT_SYMBOLS,
                     "notify_symbols": DEFAULT_SYMBOLS,
+                    "notify_intervals_by_symbol": {symbol: ["1h", "4h"] for symbol in DEFAULT_SYMBOLS},
                     "intervals": ["1h", "4h"],
                     "period": 20,
                     "stddev": 2.0,
@@ -402,6 +405,7 @@ class Database:
                 {
                     "symbols": DEFAULT_SYMBOLS,
                     "notify_symbols": DEFAULT_SYMBOLS,
+                    "notify_intervals_by_symbol": {symbol: ["1h", "4h"] for symbol in DEFAULT_SYMBOLS},
                     "intervals": ["1h", "4h"],
                     "boll_period": 20,
                     "ma_period": 99,
@@ -686,6 +690,8 @@ class Database:
         )
 
     def _migrate_strategy_config_defaults(self, now: str) -> None:
+        from .technical_notifications import notification_matrix
+
         enabled_symbols = [
             str(row["symbol"])
             for row in self.query("SELECT symbol FROM symbols WHERE enabled = 1 ORDER BY sort_order ASC, symbol ASC")
@@ -695,15 +701,20 @@ class Database:
             if strategy_row is None:
                 continue
             config = json.loads(strategy_row["config_json"])
-            if "notify_symbols" in config:
-                continue
-            configured_symbols = config.get("symbols")
-            fallback_symbols = configured_symbols if isinstance(configured_symbols, list) and configured_symbols else enabled_symbols
-            config["notify_symbols"] = [str(symbol).upper() for symbol in fallback_symbols if str(symbol).strip()]
-            self.execute(
-                "UPDATE strategy_configs SET config_json = ?, updated_at = ? WHERE id = ?",
-                (json.dumps(config, ensure_ascii=False), now, strategy_id),
-            )
+            changed = False
+            if "notify_symbols" not in config:
+                configured_symbols = config.get("symbols")
+                fallback_symbols = configured_symbols if isinstance(configured_symbols, list) and configured_symbols else enabled_symbols
+                config["notify_symbols"] = [str(symbol).upper() for symbol in fallback_symbols if str(symbol).strip()]
+                changed = True
+            if "notify_intervals_by_symbol" not in config:
+                config["notify_intervals_by_symbol"] = notification_matrix(strategy_id, config, enabled_symbols)
+                changed = True
+            if changed:
+                self.execute(
+                    "UPDATE strategy_configs SET config_json = ?, updated_at = ? WHERE id = ?",
+                    (json.dumps(config, ensure_ascii=False), now, strategy_id),
+                )
 
         social_row = self.query_one("SELECT config_json FROM strategy_configs WHERE id = 'trump_social'")
         migration_row = self.query_one("SELECT state_value FROM app_state WHERE state_key = 'truth_social_source_mode_v1'")

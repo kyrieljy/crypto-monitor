@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 from html import unescape
 from typing import Any
 
+from ..core.technical_notifications import TECHNICAL_STRATEGY_IDS, technical_notification_enabled
 from .notifiers import NotificationService
 from .store import Store
 
@@ -361,6 +362,26 @@ class NotificationWorker:
         for row in self.store.list_pending_alert_notifications():
             try:
                 strategy = self.store.get_strategy(row["strategy_id"])
+                if row["strategy_id"] in TECHNICAL_STRATEGY_IDS and (
+                    strategy is None
+                    or not strategy.enabled
+                    or not technical_notification_enabled(
+                        row["strategy_id"],
+                        strategy.config,
+                        row["symbol"],
+                        row["interval"],
+                        self.store.enabled_symbols(),
+                    )
+                ):
+                    self.store.mark_alert_notification(int(row["id"]), ok=True, error=None)
+                    LOGGER.info(
+                        "技术告警通知已按最新推送矩阵跳过 id=%s strategy=%s symbol=%s interval=%s",
+                        row["id"],
+                        row["strategy_id"],
+                        row["symbol"],
+                        row["interval"],
+                    )
+                    continue
                 notification_text = format_alert_notification(row, strategy.config if strategy else None)
                 ok, dry_run, message = self.notification_service.send_strategy_message(row["strategy_id"], notification_text)
                 self.store.mark_alert_notification(int(row["id"]), ok=ok, error=None if ok else message)

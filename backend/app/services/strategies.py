@@ -4,6 +4,7 @@ import asyncio
 import logging
 from typing import Any
 
+from ..core.technical_notifications import notification_matrix
 from .events import EventBus
 from .indicators import (
     calculate_boll,
@@ -67,27 +68,18 @@ class TechnicalStrategyRunner:
         self._run_boll()
         self._run_boll_ma_cross()
 
-    def _symbols_for(self, config: dict[str, Any]) -> list[str]:
-        configured = [str(item).upper() for item in config.get("symbols", []) if str(item).strip()]
-        enabled = set(self.store.enabled_symbols())
-        return [symbol for symbol in configured if symbol in enabled] or list(enabled)
+    def _symbols_for(self) -> list[str]:
+        return self.store.enabled_symbols()
 
-    def _notify_symbols_for(self, config: dict[str, Any]) -> set[str]:
-        enabled = set(self.store.enabled_symbols())
-        if "notify_symbols" in config:
-            raw = config.get("notify_symbols")
-            configured = raw if isinstance(raw, list) else []
-        else:
-            raw = config.get("symbols")
-            configured = raw if isinstance(raw, list) and raw else list(enabled)
-        return {str(item).upper() for item in configured if str(item).strip()} & enabled
-
-    def _configured_intervals(self, config: dict[str, Any], default: list[str]) -> list[str]:
-        raw = config.get("intervals")
-        if raw is None and config.get("interval"):
-            raw = [config.get("interval")]
-        intervals = [str(item) for item in (raw or default) if str(item).strip()]
-        return intervals or default
+    def _notification_intervals_by_symbol(self, strategy_id: str, config: dict[str, Any]) -> dict[str, set[str]]:
+        enabled_symbols = self.store.enabled_symbols()
+        matrix = notification_matrix(
+            strategy_id,
+            config,
+            enabled_symbols,
+            enabled_symbols=enabled_symbols,
+        )
+        return {symbol: set(intervals) for symbol, intervals in matrix.items()}
 
     def _intervals_to_monitor(self, notify_intervals: list[str]) -> list[str]:
         result: list[str] = []
@@ -101,12 +93,11 @@ class TechnicalStrategyRunner:
         if strategy is None or not strategy.enabled:
             return
         config = strategy.config
-        symbols = self._symbols_for(config)
-        notify_symbols = self._notify_symbols_for(config)
-        notify_intervals = self._configured_intervals(config, ["5m", "15m", "1h"])
-        notify_interval_set = set(notify_intervals)
-        intervals = self._intervals_to_monitor(notify_intervals)
+        symbols = self._symbols_for()
+        notification_intervals = self._notification_intervals_by_symbol("kdj", config)
         for symbol in symbols:
+            notify_interval_set = notification_intervals.get(symbol, set())
+            intervals = self._intervals_to_monitor(list(notify_interval_set))
             for interval in intervals:
                 try:
                     candles, source, source_role = self.market_router.fetch_klines(
@@ -138,7 +129,7 @@ class TechnicalStrategyRunner:
                             close_price=target[-1].close_price,
                             source=source,
                             source_role=source_role,
-                            notify=interval in notify_interval_set and symbol in notify_symbols,
+                            notify=interval in notify_interval_set,
                             detail={"K": points[-1].k, "D": points[-1].d, "J": points[-1].j},
                         )
                 except Exception as exc:  # noqa: BLE001
@@ -150,14 +141,13 @@ class TechnicalStrategyRunner:
         if strategy is None or not strategy.enabled:
             return
         config = strategy.config
-        symbols = self._symbols_for(config)
-        notify_symbols = self._notify_symbols_for(config)
-        notify_intervals = self._configured_intervals(config, [str(config.get("interval", "1d"))])
-        notify_interval_set = set(notify_intervals)
-        intervals = self._intervals_to_monitor(notify_intervals)
+        symbols = self._symbols_for()
+        notification_intervals = self._notification_intervals_by_symbol("ma", config)
         fast_period = int(config.get("fast_period", 25))
         slow_period = int(config.get("slow_period", 99))
         for symbol in symbols:
+            notify_interval_set = notification_intervals.get(symbol, set())
+            intervals = self._intervals_to_monitor(list(notify_interval_set))
             for interval in intervals:
                 try:
                     candles, source, source_role = self.market_router.fetch_klines(
@@ -186,7 +176,7 @@ class TechnicalStrategyRunner:
                             close_price=target[-1].close_price,
                             source=source,
                             source_role=source_role,
-                            notify=interval in notify_interval_set and symbol in notify_symbols,
+                            notify=interval in notify_interval_set,
                             detail={"fast_ma": current_fast, "slow_ma": current_slow},
                         )
                 except Exception as exc:  # noqa: BLE001
@@ -198,14 +188,13 @@ class TechnicalStrategyRunner:
         if strategy is None or not strategy.enabled:
             return
         config = strategy.config
-        symbols = self._symbols_for(config)
-        notify_symbols = self._notify_symbols_for(config)
-        notify_intervals = self._configured_intervals(config, ["1h", "4h"])
-        notify_interval_set = set(notify_intervals)
-        intervals = self._intervals_to_monitor(notify_intervals)
+        symbols = self._symbols_for()
+        notification_intervals = self._notification_intervals_by_symbol("boll", config)
         period = int(config.get("period", 20))
         stddev = float(config.get("stddev", 2.0))
         for symbol in symbols:
+            notify_interval_set = notification_intervals.get(symbol, set())
+            intervals = self._intervals_to_monitor(list(notify_interval_set))
             for interval in intervals:
                 try:
                     candles, source, source_role = self.market_router.fetch_klines(
@@ -232,7 +221,7 @@ class TechnicalStrategyRunner:
                             close_price=points[-1].close,
                             source=source,
                             source_role=source_role,
-                            notify=interval in notify_interval_set and symbol in notify_symbols,
+                            notify=interval in notify_interval_set,
                             detail={
                                 "middle": points[-1].middle,
                                 "upper": points[-1].upper,
@@ -248,15 +237,14 @@ class TechnicalStrategyRunner:
         if strategy is None or not strategy.enabled:
             return
         config = strategy.config
-        symbols = self._symbols_for(config)
-        notify_symbols = self._notify_symbols_for(config)
-        notify_intervals = self._configured_intervals(config, ["1h", "4h"])
-        notify_interval_set = set(notify_intervals)
-        intervals = self._intervals_to_monitor(notify_intervals)
+        symbols = self._symbols_for()
+        notification_intervals = self._notification_intervals_by_symbol("boll_ma_cross", config)
         boll_period = max(1, int(config.get("boll_period", 20)))
         ma_period = max(1, int(config.get("ma_period", 99)))
         minimum_candles = max(boll_period, ma_period) + 1
         for symbol in symbols:
+            notify_interval_set = notification_intervals.get(symbol, set())
+            intervals = self._intervals_to_monitor(list(notify_interval_set))
             for interval in intervals:
                 try:
                     candles, source, source_role = self.market_router.fetch_klines(
@@ -285,7 +273,7 @@ class TechnicalStrategyRunner:
                             close_price=target[-1].close_price,
                             source=source,
                             source_role=source_role,
-                            notify=interval in notify_interval_set and symbol in notify_symbols,
+                            notify=interval in notify_interval_set,
                             detail={
                                 "boll_middle": current_middle,
                                 "ma": current_ma,

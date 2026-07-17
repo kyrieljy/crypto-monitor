@@ -79,8 +79,14 @@ const DATA_SOURCE_OPTIONS = [
 ];
 const WHALE_TAG_OPTIONS = ["聪明钱", "巨鲸", "KOL", "机构", "做市商", "交易员", "重点关注"];
 const TECHNICAL_STRATEGY_IDS = new Set(["kdj", "ma", "boll", "boll_ma_cross"]);
+const TECHNICAL_NOTIFICATION_TABS = [
+  { id: "kdj", label: "KDJ" },
+  { id: "ma", label: "MA" },
+  { id: "boll", label: "BOLL" },
+  { id: "boll_ma_cross", label: "BOLL中轨/MA" }
+] as const;
 const STRATEGY_GROUPS = [
-  { title: "技术策略", ids: ["boll", "boll_ma_cross", "kdj", "ma"] },
+  { title: "技术策略", ids: ["boll", "boll_ma_cross", "kdj", "ma"], technicalMatrix: true },
   { title: "巨鲸", ids: ["whale"], whaleTargets: true },
   { title: "社媒和新闻", ids: ["trump_social", "whitehouse"] },
   { title: "翻译和清理", ids: ["translation", "cleanup"] }
@@ -2897,12 +2903,27 @@ function AdminContent({
                   <strong>{group.title}</strong>
                   <span>{groupStrategies.length} 项</span>
                 </div>
+                {group.technicalMatrix && (
+                  <TechnicalNotificationMatrix
+                    strategies={groupStrategies}
+                    symbols={symbols}
+                    notifiers={notifiers}
+                    onChange={(index, next) => {
+                      dirtyStrategyIdsRef.current.add(next.id);
+                      updateArray(strategies, setStrategies, index, next);
+                    }}
+                    onSave={(index) => {
+                      const latest = strategiesRef.current[index];
+                      if (latest) saveStrategy.mutate(latest);
+                    }}
+                    disabled={saveStrategy.isPending}
+                  />
+                )}
                 <div className={group.whaleTargets ? "strategy-editors strategy-editors--whale" : "strategy-editors"}>
                   {groupStrategies.map(({ strategy, index }) => (
                     <StrategyEditor
                       key={strategy.id}
                       strategy={strategy}
-                      symbols={symbols}
                       notifiers={notifiers}
                       whaleTargets={notifierWhaleTargets}
                       setNotice={setNotice}
@@ -3246,9 +3267,163 @@ function WhaleTargetManager({ setNotice, embedded = false }: { setNotice: (notic
   );
 }
 
+function TechnicalNotificationMatrix({
+  strategies,
+  symbols,
+  notifiers,
+  onChange,
+  onSave,
+  disabled
+}: {
+  strategies: Array<{ strategy: MutableStrategy; index: number }>;
+  symbols: SymbolItem[];
+  notifiers: NotifierTarget[];
+  onChange: (index: number, strategy: MutableStrategy) => void;
+  onSave: (index: number) => void;
+  disabled: boolean;
+}) {
+  const [activeId, setActiveId] = useState<string>("kdj");
+  const active = strategies.find(({ strategy }) => strategy.id === activeId) ?? strategies[0];
+  if (!active) return null;
+
+  const { strategy, index } = active;
+  const matrix = technicalNotificationMatrix(strategy, symbols);
+  const enabledSymbols = symbols.filter((symbol) => symbol.enabled);
+  const selectedCount = Object.values(matrix).reduce((total, intervals) => total + intervals.length, 0);
+
+  const replaceMatrix = (next: Record<string, string[]>) => {
+    onChange(index, {
+      ...strategy,
+      config: { ...strategy.config, notify_intervals_by_symbol: normalizeTechnicalNotificationMatrix(next) }
+    });
+  };
+  const setCell = (symbol: string, interval: string, checked: boolean) => {
+    const selected = new Set(matrix[symbol] ?? []);
+    if (checked) selected.add(interval);
+    else selected.delete(interval);
+    replaceMatrix({ ...matrix, [symbol]: INTERVAL_OPTIONS.filter((item) => selected.has(item)) });
+  };
+  const setRow = (symbol: string, checked: boolean) => {
+    replaceMatrix({ ...matrix, [symbol]: checked ? [...INTERVAL_OPTIONS] : [] });
+  };
+  const setColumn = (interval: string, checked: boolean) => {
+    const next = { ...matrix };
+    enabledSymbols.forEach(({ symbol }) => {
+      const selected = new Set(next[symbol] ?? []);
+      if (checked) selected.add(interval);
+      else selected.delete(interval);
+      next[symbol] = INTERVAL_OPTIONS.filter((item) => selected.has(item));
+    });
+    replaceMatrix(next);
+  };
+  const setAll = (checked: boolean) => {
+    const next = { ...matrix };
+    enabledSymbols.forEach(({ symbol }) => {
+      next[symbol] = checked ? [...INTERVAL_OPTIONS] : [];
+    });
+    replaceMatrix(next);
+  };
+
+  return (
+    <div className="technical-notification-matrix">
+      <div className="technical-notification-matrix__tabs" role="tablist" aria-label="技术指标推送矩阵">
+        {TECHNICAL_NOTIFICATION_TABS.filter((tab) => strategies.some(({ strategy: item }) => item.id === tab.id)).map((tab) => (
+          <button
+            type="button"
+            role="tab"
+            aria-selected={strategy.id === tab.id}
+            className={strategy.id === tab.id ? "active" : ""}
+            key={tab.id}
+            onClick={() => setActiveId(tab.id)}
+          >
+            {tab.label}
+          </button>
+        ))}
+      </div>
+      <div className="technical-notification-matrix__toolbar">
+        <div>
+          <strong>{strategyLabels[strategy.id] ?? strategy.name}</strong>
+          <span className={strategy.enabled ? "matrix-status matrix-status--active" : "matrix-status"}>{strategy.enabled ? "策略已启用" : "策略已停用"}</span>
+          <span className="matrix-count">已选 {selectedCount} 个组合</span>
+        </div>
+        <div className="technical-notification-matrix__actions">
+          <button type="button" onClick={() => setAll(true)}>全部全选</button>
+          <button type="button" onClick={() => setAll(false)}>全部清空</button>
+          <select
+            aria-label="绑定机器人"
+            value={strategy.notifier_id ?? ""}
+            onChange={(event) => onChange(index, { ...strategy, notifier_id: event.target.value || null })}
+          >
+            <option value="">不绑定机器人</option>
+            {notifiers.map((notifier) => <option value={notifier.id} key={notifier.id}>{notifier.name}</option>)}
+          </select>
+          <button className="primary-action" type="button" onClick={() => onSave(index)} disabled={disabled}>
+            <Save size={16} /> 保存当前指标
+          </button>
+        </div>
+      </div>
+      <div className="technical-notification-matrix__scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>币种</th>
+              {INTERVAL_OPTIONS.map((interval) => {
+                const allSelected = enabledSymbols.length > 0 && enabledSymbols.every(({ symbol }) => matrix[symbol]?.includes(interval));
+                return (
+                  <th key={interval}>
+                    <button
+                      type="button"
+                      className={allSelected ? "selected" : ""}
+                      title={`${interval} 整列${allSelected ? "清空" : "全选"}`}
+                      onClick={() => setColumn(interval, !allSelected)}
+                    >
+                      <span>{interval}</span>
+                      <small>{allSelected ? "清空" : "全选"}</small>
+                    </button>
+                  </th>
+                );
+              })}
+              <th>整行</th>
+            </tr>
+          </thead>
+          <tbody>
+            {symbols.map((symbol) => {
+              const rowSelected = INTERVAL_OPTIONS.every((interval) => matrix[symbol.symbol]?.includes(interval));
+              return (
+                <tr className={symbol.enabled ? "" : "is-disabled"} key={symbol.symbol}>
+                  <th title={symbol.symbol}>
+                    <span>{symbol.display_name || symbol.symbol}</span>
+                    {!symbol.enabled && <small>已停用</small>}
+                  </th>
+                  {INTERVAL_OPTIONS.map((interval) => (
+                    <td key={interval}>
+                      <input
+                        type="checkbox"
+                        aria-label={`${symbol.symbol} ${interval}`}
+                        checked={Boolean(matrix[symbol.symbol]?.includes(interval))}
+                        disabled={!symbol.enabled}
+                        onChange={(event) => setCell(symbol.symbol, interval, event.target.checked)}
+                      />
+                    </td>
+                  ))}
+                  <td>
+                    <button type="button" disabled={!symbol.enabled} onClick={() => setRow(symbol.symbol, !rowSelected)}>
+                      {rowSelected ? "清空" : "全选"}
+                    </button>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      <span className="hint">矩阵只控制机器人推送；停用币种的原配置会保留，重新启用后恢复。前台固定周期告警不受影响。</span>
+    </div>
+  );
+}
+
 function StrategyEditor({
   strategy,
-  symbols,
   notifiers,
   whaleTargets,
   setNotice,
@@ -3257,7 +3432,6 @@ function StrategyEditor({
   disabled
 }: {
   strategy: MutableStrategy;
-  symbols: SymbolItem[];
   notifiers: NotifierTarget[];
   whaleTargets: WhaleTarget[];
   setNotice: (notice: string) => void;
@@ -3267,24 +3441,8 @@ function StrategyEditor({
 }) {
   const config = strategy.config;
   const setConfig = (patch: Record<string, unknown>) => onChange({ ...strategy, config: { ...config, ...patch } });
-  const canBindNotifier = strategy.id !== "translation" && strategy.id !== "cleanup";
-  const hasReminderIntervals = TECHNICAL_STRATEGY_IDS.has(strategy.id);
-  const configuredIntervals = arr(config.intervals);
-  const reminderIntervals = strategy.id === "ma" && !configuredIntervals.length ? [String(config.interval ?? "1d")] : configuredIntervals;
-  const enabledSymbolIds = symbols.filter((symbol) => symbol.enabled).map((symbol) => symbol.symbol);
-  const legacySymbols = arr(config.symbols);
-  const reminderSymbols = Array.isArray(config.notify_symbols)
-    ? arr(config.notify_symbols)
-    : legacySymbols.length
-      ? legacySymbols
-      : enabledSymbolIds;
-  const setReminderIntervals = (intervals: string[]) => {
-    if (strategy.id === "ma") {
-      setConfig({ intervals, interval: intervals[0] ?? config.interval ?? "1d" });
-      return;
-    }
-    setConfig({ intervals });
-  };
+  const isTechnicalStrategy = TECHNICAL_STRATEGY_IDS.has(strategy.id);
+  const canBindNotifier = !isTechnicalStrategy && strategy.id !== "translation" && strategy.id !== "cleanup";
   const truthSource = config.enable_truthbrush && config.enable_truth_social ? "both" : config.enable_truthbrush ? "truthbrush" : "rss";
   const setTruthSource = (mode: string) => {
     setConfig({
@@ -3311,18 +3469,6 @@ function StrategyEditor({
         <strong>{strategyLabels[strategy.id] ?? strategy.name}</strong>
         <Switch checked={strategy.enabled} onChange={(enabled) => onChange({ ...strategy, enabled })} />
       </div>
-      {hasReminderIntervals && (
-        <div className="strategy-reminder-top">
-          <IntervalMultiSelect label="机器人提醒周期" value={reminderIntervals} onChange={setReminderIntervals} />
-          <SymbolMultiSelect
-            label="机器人提醒币种"
-            symbols={symbols}
-            value={reminderSymbols}
-            onChange={(notify_symbols) => setConfig({ notify_symbols })}
-          />
-          {!reminderSymbols.length && <span className="hint">当前未选择提醒币种：前台仍显示告警，机器人不会推送该策略。</span>}
-        </div>
-      )}
       <div className="form-grid">
         {strategy.id === "kdj" && (
           <>
@@ -3465,7 +3611,13 @@ function StrategyEditor({
             {notifiers.map((notifier) => <option value={notifier.id} key={notifier.id}>{notifier.name}</option>)}
           </select>
         ) : (
-          <span className="hint">{strategy.id === "cleanup" ? "清理策略不绑定机器人；只在后台定时维护数据库容量。" : "大模型翻译只处理社媒和新闻文本，不绑定通知机器人。"}</span>
+          <span className="hint">
+            {isTechnicalStrategy
+              ? "机器人和推送组合请在上方技术指标推送矩阵中管理。"
+              : strategy.id === "cleanup"
+                ? "清理策略不绑定机器人；只在后台定时维护数据库容量。"
+                : "大模型翻译只处理社媒和新闻文本，不绑定通知机器人。"}
+          </span>
         )}
         <button onClick={onSave} disabled={disabled}><Save size={16} /> 保存</button>
       </div>
@@ -3905,65 +4057,44 @@ function StrategyIntervalControl({ label, value, onChange }: { label: string; va
   );
 }
 
-function IntervalMultiSelect({ label, value, onChange }: { label: string; value: string[]; onChange: (value: string[]) => void }) {
-  return (
-    <fieldset className="field check-group">
-      <legend>{label}</legend>
-      <div>
-        {INTERVAL_OPTIONS.map((interval) => (
-          <label key={interval}>
-            <input
-              type="checkbox"
-              checked={value.includes(interval)}
-              onChange={(event) => {
-                const next = event.target.checked ? [...value, interval] : value.filter((item) => item !== interval);
-                onChange(INTERVAL_OPTIONS.filter((item) => next.includes(item)));
-              }}
-            />
-            <span>{interval}</span>
-          </label>
-        ))}
-      </div>
-    </fieldset>
-  );
-}
-
-function SymbolMultiSelect({
-  label,
-  symbols,
-  value,
-  onChange
-}: {
-  label: string;
-  symbols: SymbolItem[];
-  value: string[];
-  onChange: (value: string[]) => void;
-}) {
-  return (
-    <fieldset className="field check-group">
-      <legend>{label}</legend>
-      <div>
-        {symbols.map((symbol) => (
-          <label key={symbol.symbol} title={symbol.enabled ? symbol.symbol : `${symbol.symbol} 已在币种管理中停用`}>
-            <input
-              type="checkbox"
-              checked={value.includes(symbol.symbol)}
-              disabled={!symbol.enabled}
-              onChange={(event) => {
-                const next = event.target.checked ? [...value, symbol.symbol] : value.filter((item) => item !== symbol.symbol);
-                onChange(symbols.map((item) => item.symbol).filter((item) => next.includes(item)));
-              }}
-            />
-            <span>{symbol.display_name || symbol.symbol}</span>
-          </label>
-        ))}
-      </div>
-    </fieldset>
-  );
-}
-
 function arr(value: unknown): string[] {
   return Array.isArray(value) ? value.map(String) : [];
+}
+
+function normalizeTechnicalNotificationMatrix(value: Record<string, string[]>): Record<string, string[]> {
+  const result: Record<string, string[]> = {};
+  Object.entries(value).forEach(([rawSymbol, rawIntervals]) => {
+    const symbol = rawSymbol.trim().toUpperCase();
+    if (!symbol) return;
+    const selected = new Set(Array.isArray(rawIntervals) ? rawIntervals.map(String) : []);
+    const intervals = INTERVAL_OPTIONS.filter((interval) => selected.has(interval));
+    if (intervals.length) result[symbol] = intervals;
+  });
+  return result;
+}
+
+function technicalNotificationMatrix(strategy: MutableStrategy, symbols: SymbolItem[]): Record<string, string[]> {
+  const config = strategy.config;
+  if (Object.prototype.hasOwnProperty.call(config, "notify_intervals_by_symbol")) {
+    const raw = config.notify_intervals_by_symbol;
+    return normalizeTechnicalNotificationMatrix(raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {});
+  }
+
+  const configuredIntervals = arr(config.intervals);
+  const fallbackIntervals = configuredIntervals.length
+    ? configuredIntervals
+    : strategy.id === "ma"
+      ? [String(config.interval ?? "1d")]
+      : strategy.id === "kdj"
+        ? ["5m", "15m", "1h"]
+        : ["1h", "4h"];
+  const enabledSymbolIds = symbols.filter((symbol) => symbol.enabled).map((symbol) => symbol.symbol);
+  const configuredSymbols = Array.isArray(config.notify_symbols)
+    ? arr(config.notify_symbols)
+    : arr(config.symbols).length
+      ? arr(config.symbols)
+      : enabledSymbolIds;
+  return normalizeTechnicalNotificationMatrix(Object.fromEntries(configuredSymbols.map((symbol) => [symbol, fallbackIntervals])));
 }
 
 function uniqueStrings(values: string[]): string[] {
