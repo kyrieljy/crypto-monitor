@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef } from "react";
 import { createChart, type IChartApi, type UTCTimestamp } from "lightweight-charts";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../lib/api";
-import { formatNumber } from "../lib/format";
+import { formatPrice } from "../lib/format";
 import type { Kline } from "../types/api";
 
 interface IndicatorSettings {
@@ -211,6 +211,8 @@ export function CoinChart({
     const series = candleSeriesRef.current;
     if (!chart || !series || !hasChartRows) return;
     const candleData = chartRows.map((item) => ({ ...item, time: item.time as UTCTimestamp }));
+    const precision = chartRows.some((item) => item.close > 0 && item.close < 1) ? 8 : 4;
+    series.applyOptions({ priceFormat: { type: "price", precision, minMove: 10 ** -precision } });
     series.setData(candleData);
     indicatorSeriesRef.current.forEach((line) => chart.removeSeries(line));
     indicatorSeriesRef.current = showIndicators ? addIndicatorLines(chart, chartRows, indicatorSettings, indicatorMode) : [];
@@ -242,7 +244,7 @@ export function CoinChart({
           <span>{interval}</span>
         </div>
         <b className={latest && latest.close >= latest.open ? "up" : "down"}>
-          {latest ? `${formatNumber(latest.close, 3)} ${change !== null ? `${change >= 0 ? "+" : ""}${change.toFixed(2)}%` : ""}` : "—"}
+          {latest ? `${formatPrice(latest.close, 3)} ${change !== null ? `${change >= 0 ? "+" : ""}${change.toFixed(2)}%` : ""}` : "—"}
         </b>
       </div>
       {showIndicators && (
@@ -279,7 +281,7 @@ export function CoinChart({
       )}
       <div ref={containerRef} className="coin-chart__canvas">
         {isLoading && <span className="empty">加载 {interval} K 线中</span>}
-        {isError && <span className="empty">行情暂不可用</span>}
+        {(isError || (!isLoading && !hasChartRows)) && <span className="empty">行情暂不可用</span>}
       </div>
     </div>
   );

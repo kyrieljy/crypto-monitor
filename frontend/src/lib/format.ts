@@ -15,6 +15,10 @@ export function formatNumber(value: unknown, digits = 2) {
 }
 
 export const strategyLabels: Record<string, string> = {
+  altcoin_kdj: "KDJ",
+  altcoin_ma: "MA",
+  altcoin_boll: "BOLL",
+  altcoin_boll_ma_cross: "BOLL中轨/MA",
   kdj: "KDJ",
   ma: "MA",
   boll: "BOLL",
@@ -25,3 +29,12 @@ export const strategyLabels: Record<string, string> = {
   translation: "大模型翻译",
   cleanup: "服务器清理"
 };
+
+export function technicalKind(id: string) {
+  return id.replace(/^altcoin_/, "");
+}
+
+export function formatPrice(value: unknown, digits = 4) {
+  const number = Number(value);
+  return formatNumber(value, number !== 0 && Math.abs(number) < 1 ? 8 : digits);
+}

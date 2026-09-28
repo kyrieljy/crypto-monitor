@@ -545,7 +545,9 @@ def get_klines(symbol: str, interval: str, limit: int = 80) -> list[KlineOut]:
     if not settings.run_workers:
         return []
     try:
-        chart_module = next((module for module in store.list_modules() if module.id == "charts"), None)
+        symbol_item = next((item for item in store.list_symbols() if item.symbol == symbol.upper()), None)
+        module_id = "altcoin_charts" if symbol_item and symbol_item.market_group == "altcoin" else "charts"
+        chart_module = next((module for module in store.list_modules() if module.id == module_id), None)
         data_source = str((chart_module.config if chart_module else {}).get("data_source", "okx_then_binance"))
         candles, source, source_role = market_router.fetch_klines(symbol.upper(), interval, min(max(limit, 20), 1000), data_source)
     except DataSourceError as exc:
@@ -573,7 +575,7 @@ def get_snapshot() -> SnapshotOut:
         strategies=store.list_strategies(),
         modules=store.list_modules(),
         layout=store.get_layout(),
-        alerts=store.list_alerts(500),
+        alerts=sorted(store.list_alerts(500, "main") + store.list_alerts(500, "altcoin"), key=lambda alert: alert.id, reverse=True),
         news=store.list_news(50),
         health=store.list_health(),
     )

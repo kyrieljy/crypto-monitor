@@ -63,6 +63,13 @@ class BinanceFuturesDataSource:
 
 
 OKX_SYMBOL_MAP = {
+    "TAOUSDT": "TAO-USDT-SWAP",
+    "UNIUSDT": "UNI-USDT-SWAP",
+    "CRCLUSDT": "CRCL-USDT-SWAP",
+    "PENGUUSDT": "PENGU-USDT-SWAP",
+    "ASTERUSDT": "ASTER-USDT-SWAP",
+    "DOGEUSDT": "DOGE-USDT-SWAP",
+    "XRPUSDT": "XRP-USDT-SWAP",
     "BTCUSDT": "BTC-USDT-SWAP",
     "ETHUSDT": "ETH-USDT-SWAP",
     "SOLUSDT": "SOL-USDT-SWAP",
@@ -167,9 +174,15 @@ class DataSourceRouter:
             return self.binance.fetch_klines(symbol, interval, limit), self.binance.name, "PRIMARY"
         if preference == "binance_then_okx":
             try:
-                return self.binance.fetch_klines(symbol, interval, limit), self.binance.name, "PRIMARY"
+                candles = self.binance.fetch_klines(symbol, interval, limit)
+                if not candles:
+                    raise DataSourceError(f"Empty Binance candles: {symbol}")
+                return candles, self.binance.name, "PRIMARY"
             except DataSourceError:
-                return self.okx.fetch_klines(symbol, interval, limit), self.okx.name, "BACKUP"
+                candles = self.okx.fetch_klines(symbol, interval, limit)
+                if not candles:
+                    raise DataSourceError(f"Empty OKX candles: {symbol}")
+                return candles, self.okx.name, "BACKUP"
         if preference == "okx_then_binance":
             try:
                 return self.okx.fetch_klines(symbol, interval, limit), self.okx.name, "PRIMARY"

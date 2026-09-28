@@ -221,6 +221,7 @@ def _configured_chain_addresses(address_or_subject: str, config: dict[str, Any])
 
 
 MODULE_LAYOUT_DEFAULTS: dict[str, dict[str, int]] = {
+    "altcoin_charts": {"x": 0, "y": 16, "w": 12, "h": 16},
     "charts": {"x": 0, "y": 0, "w": 12, "h": 16},
     "whale": {"x": 0, "y": 16, "w": 12, "h": 8},
     "trump_social": {"x": 0, "y": 24, "w": 6, "h": 7},
@@ -273,18 +274,18 @@ class Store:
 
     def list_symbols(self) -> list[SymbolItem]:
         rows = self.db.query("SELECT * FROM symbols ORDER BY sort_order ASC, symbol ASC")
-        return [SymbolItem(symbol=row["symbol"], display_name=row["display_name"], enabled=bool(row["enabled"]), sort_order=int(row["sort_order"])) for row in rows]
+        return [SymbolItem(symbol=row["symbol"], market_group=row["market_group"], display_name=row["display_name"], enabled=bool(row["enabled"]), sort_order=int(row["sort_order"])) for row in rows]
 
     def replace_symbols(self, items: list[SymbolItem]) -> list[SymbolItem]:
         self.db.execute("DELETE FROM symbols")
         self.db.executemany(
-            "INSERT INTO symbols (symbol, display_name, enabled, sort_order) VALUES (?, ?, ?, ?)",
-            [(item.symbol.upper(), item.display_name, int(item.enabled), item.sort_order) for item in items],
+            "INSERT INTO symbols (symbol, display_name, enabled, sort_order, market_group) VALUES (?, ?, ?, ?, ?)",
+            [(item.symbol.upper(), item.display_name, int(item.enabled), item.sort_order, item.market_group) for item in items],
         )
         return self.list_symbols()
 
-    def enabled_symbols(self) -> list[str]:
-        return [item.symbol for item in self.list_symbols() if item.enabled]
+    def enabled_symbols(self, market_group: str | None = None) -> list[str]:
+        return [item.symbol for item in self.list_symbols() if item.enabled and (market_group is None or item.market_group == market_group)]
 
     def list_strategies(self) -> list[StrategyConfig]:
         rows = self.db.query(
@@ -562,8 +563,11 @@ class Store:
             return None
         return int(cursor.lastrowid)
 
-    def list_alerts(self, limit: int = 80) -> list[AlertEventOut]:
-        rows = self.db.query("SELECT * FROM alert_events ORDER BY id DESC LIMIT ?", (limit,))
+    def list_alerts(self, limit: int = 80, market_group: str | None = None) -> list[AlertEventOut]:
+        clause = ""
+        if market_group is not None:
+            clause = "WHERE strategy_id GLOB 'altcoin_*'" if market_group == "altcoin" else "WHERE strategy_id NOT GLOB 'altcoin_*'"
+        rows = self.db.query(f"SELECT * FROM alert_events {clause} ORDER BY id DESC LIMIT ?", (limit,))
         return [
             AlertEventOut(
                 id=int(row["id"]),

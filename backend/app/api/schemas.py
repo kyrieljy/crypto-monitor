@@ -15,6 +15,7 @@ class LoginResponse(BaseModel):
 
 class SymbolItem(BaseModel):
     symbol: str
+    market_group: Literal["main", "altcoin"] = "main"
     display_name: str
     enabled: bool = True
     sort_order: int = 0

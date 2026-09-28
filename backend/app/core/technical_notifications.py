@@ -4,7 +4,18 @@ from collections.abc import Iterable
 from typing import Any
 
 
-TECHNICAL_STRATEGY_IDS = ("kdj", "ma", "boll", "boll_ma_cross")
+BASE_TECHNICAL_STRATEGY_IDS = ("kdj", "ma", "boll", "boll_ma_cross")
+TECHNICAL_STRATEGY_IDS = (*BASE_TECHNICAL_STRATEGY_IDS, *(f"altcoin_{kind}" for kind in BASE_TECHNICAL_STRATEGY_IDS))
+
+
+def technical_kind(strategy_id: str) -> str:
+    return strategy_id.removeprefix("altcoin_")
+
+
+def technical_market_group(strategy_id: str) -> str:
+    return "altcoin" if strategy_id.startswith("altcoin_") else "main"
+
+
 TECHNICAL_NOTIFICATION_INTERVALS = ("1m", "5m", "15m", "30m", "1h", "4h", "1d")
 
 DEFAULT_NOTIFICATION_INTERVALS: dict[str, tuple[str, ...]] = {

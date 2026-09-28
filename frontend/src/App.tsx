@@ -32,7 +32,7 @@ import { CoinChart } from "./components/CoinChart";
 import { Panel } from "./components/Panel";
 import { Switch } from "./components/Switch";
 import { api } from "./lib/api";
-import { cnDate, formatNumber, strategyLabels } from "./lib/format";
+import { cnDate, formatNumber, formatPrice, strategyLabels, technicalKind } from "./lib/format";
 import type {
   AlertEvent,
   BtcLargeTransfer,
@@ -56,7 +56,7 @@ const Grid = WidthProvider(GridLayout);
 
 type ViewMode = "dashboard" | "admin";
 type MutableStrategy = StrategyConfig & { config: Record<string, any> };
-const FIXED_DASHBOARD_MODULES = new Set(["charts"]);
+const FIXED_DASHBOARD_MODULES = new Set(["charts", "altcoin_charts"]);
 const COLLAPSED_ALERT_GROUP_HEIGHT = 184;
 
 const INTERVAL_OPTIONS = ["1m", "5m", "15m", "30m", "1h", "4h", "1d"];
@@ -78,7 +78,7 @@ const DATA_SOURCE_OPTIONS = [
   { value: "binance_only", label: "币安 Futures" }
 ];
 const WHALE_TAG_OPTIONS = ["聪明钱", "巨鲸", "KOL", "机构", "做市商", "交易员", "重点关注"];
-const TECHNICAL_STRATEGY_IDS = new Set(["kdj", "ma", "boll", "boll_ma_cross"]);
+const TECHNICAL_STRATEGY_IDS = new Set(["kdj", "ma", "boll", "boll_ma_cross", "altcoin_kdj", "altcoin_ma", "altcoin_boll", "altcoin_boll_ma_cross"]);
 const TECHNICAL_NOTIFICATION_TABS = [
   { id: "kdj", label: "KDJ" },
   { id: "ma", label: "MA" },
@@ -87,6 +87,7 @@ const TECHNICAL_NOTIFICATION_TABS = [
 ] as const;
 const STRATEGY_GROUPS = [
   { title: "技术策略", ids: ["boll", "boll_ma_cross", "kdj", "ma"], technicalMatrix: true },
+  { title: "山寨币技术策略", ids: ["altcoin_boll", "altcoin_boll_ma_cross", "altcoin_kdj", "altcoin_ma"], technicalMatrix: true },
   { title: "巨鲸", ids: ["whale"], whaleTargets: true },
   { title: "社媒和新闻", ids: ["trump_social", "whitehouse"] },
   { title: "翻译和清理", ids: ["translation", "cleanup"] }
@@ -380,7 +381,7 @@ function Dashboard({
     }
   });
   const modules = new Map(data.modules.map((item) => [item.id, item]));
-  const fixedLayout = layout.filter((item) => FIXED_DASHBOARD_MODULES.has(item.i));
+  const fixedLayout = layout.filter((item) => FIXED_DASHBOARD_MODULES.has(item.i)).sort((a, b) => Number(a.i !== "charts") - Number(b.i !== "charts"));
   const gridSourceLayout = layout.filter((item) => !FIXED_DASHBOARD_MODULES.has(item.i));
   const gridOffsetY = gridSourceLayout.length > 0 ? Math.min(...gridSourceLayout.map((item) => Number(item.y || 0))) : 0;
   const gridLayout = gridSourceLayout.map((item) => ({ ...item, y: Number(item.y || 0) - gridOffsetY }));
@@ -465,9 +466,10 @@ function Dashboard({
 
 function renderModule(id: string, module: DashboardModule | undefined, data: Snapshot, onWhaleSelect: (id: string) => void, controls: DashboardControls) {
   const title = module?.title ?? id;
+  if (id === "altcoin_charts") return <AltcoinMarketPanel data={data} module={module} />;
   if (id === "charts") {
     const dataSource = String(module?.config?.data_source ?? "okx_then_binance");
-    const enabledSymbols = data.symbols.filter((item) => item.enabled).slice(0, 5);
+    const enabledSymbols = data.symbols.filter((item) => item.enabled && item.market_group !== "altcoin").slice(0, 5);
     const ethSymbol = enabledSymbols.find((item) => item.symbol === "ETHUSDT") ?? enabledSymbols[0];
     const secondarySymbols = enabledSymbols.filter((item) => item.symbol !== ethSymbol?.symbol).slice(0, 4);
     const indicatorSettings = indicatorSettingsFromStrategies(data.strategies);
@@ -514,7 +516,7 @@ function renderModule(id: string, module: DashboardModule | undefined, data: Sna
               </div>
               <CoinAlertStack
                 className="eth-alert-stack"
-                alerts={data.alerts.filter((alert) => alert.symbol === ethSymbol.symbol)}
+                alerts={data.alerts.filter((alert) => alert.symbol === ethSymbol.symbol && !alert.strategy_id.startsWith("altcoin_"))}
                 strategyIntervals={controls.strategyIntervals}
                 collapsedHeight={138}
               />
@@ -525,7 +527,7 @@ function renderModule(id: string, module: DashboardModule | undefined, data: Sna
               <CoinStrategyCard
                 key={item.symbol}
                 symbol={item.symbol}
-                alerts={data.alerts.filter((alert) => alert.symbol === item.symbol)}
+                alerts={data.alerts.filter((alert) => alert.symbol === item.symbol && !alert.strategy_id.startsWith("altcoin_"))}
                 chartInterval={controls.chartInterval}
                 strategyIntervals={controls.strategyIntervals}
                 onChartSourceChange={(value) => controls.setActiveChartSource(item.symbol, value)}
@@ -752,6 +754,55 @@ function positiveNumber(value: unknown, fallback: number) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+function AltcoinMarketPanel({ data, module }: { data: Snapshot; module?: DashboardModule }) {
+  const queryClient = useQueryClient();
+  const [collapsed, setCollapsed] = useState(() => localStorage.getItem("altcoinCollapsed") === "true");
+  const [chartInterval, setChartInterval] = useState(() => localStorage.getItem("altcoinChartInterval") || "15m");
+  const [strategyIntervals, setStrategyIntervals] = useState<Record<string, string>>(() => {
+    try {
+      return { kdj: "15m", ma: "15m", boll: "15m", ...JSON.parse(localStorage.getItem("altcoinStrategyIntervals") || "{}") };
+    } catch {
+      return { kdj: "15m", ma: "15m", boll: "15m" };
+    }
+  });
+  useEffect(() => { localStorage.setItem("altcoinCollapsed", String(collapsed)); }, [collapsed]);
+  useEffect(() => { localStorage.setItem("altcoinChartInterval", chartInterval); }, [chartInterval]);
+  useEffect(() => { localStorage.setItem("altcoinStrategyIntervals", JSON.stringify(strategyIntervals)); }, [strategyIntervals]);
+  const symbols = data.symbols.filter((item) => item.enabled && item.market_group === "altcoin");
+  const refresh = () => {
+    void queryClient.invalidateQueries({ queryKey: ["klines"], predicate: (query) => symbols.some((item) => item.symbol === query.queryKey[1]) });
+    void queryClient.invalidateQueries({ queryKey: ["snapshot"] });
+  };
+  return (
+    <Panel title={module?.title ?? "山寨币行情策略监控"} dragHandle={false} action={
+      <div className="altcoin-actions">
+        <span className="muted">{symbols.length} 个标的 · {dataSourceLabel(String(module?.config.data_source ?? "binance_then_okx"))}</span>
+        {!collapsed && <button type="button" onClick={refresh} aria-label="刷新山寨币行情"><RefreshCw size={14} /></button>}
+        <button type="button" aria-expanded={!collapsed} aria-controls="altcoin-market-content" onClick={() => setCollapsed((value) => !value)}>{collapsed ? "展开" : "收起"}</button>
+      </div>
+    }>
+      {!collapsed && <div id="altcoin-market-content">
+        <div className="chart-toolbar">
+          <div className="chart-toolbar__group"><span>K 线周期</span><IntervalSegmented value={chartInterval} onChange={setChartInterval} /></div>
+          <div className="chart-toolbar__group strategy-cycle-controls">
+            <span>策略展示周期</span>
+            {ALERT_GROUPS.map((group) => <StrategyIntervalControl key={group.id} label={group.label} value={strategyIntervals[group.id] ?? "15m"} onChange={(value) => setStrategyIntervals((current) => ({ ...current, [group.id]: value }))} />)}
+          </div>
+        </div>
+        <div className="coin-wall coin-wall--secondary">
+          {symbols.map((item) => <CoinStrategyCard key={item.symbol} symbol={item.symbol}
+            alerts={data.alerts.filter((alert) => alert.symbol === item.symbol && alert.strategy_id.startsWith("altcoin_"))}
+            chartInterval={chartInterval} strategyIntervals={strategyIntervals} onChartSourceChange={ignoreChartSource} />)}
+        </div>
+        {!symbols.length && <span className="empty">暂无启用的山寨币，请在后台币种管理中启用。</span>}
+        <small className="muted">币安人生暂无 OKX 备用合约，主源不可用时显示行情暂不可用。</small>
+      </div>}
+    </Panel>
+  );
+}
+
+function ignoreChartSource() {}
+
 function CoinStrategyCard({
   symbol,
   alerts,
@@ -792,7 +843,7 @@ function CoinAlertStack({
         const selectedInterval = strategyIntervals[group.id] ?? "15m";
         const groupKey = `${group.id}:${selectedInterval}`;
         const allItems = alerts
-          .filter((alert) => group.strategyIds.some((strategyId) => alert.strategy_id === strategyId) && alert.interval === selectedInterval)
+          .filter((alert) => group.strategyIds.some((strategyId) => technicalKind(alert.strategy_id) === strategyId) && alert.interval === selectedInterval)
           .sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at));
         const canExpand = allItems.length > 3;
         const isExpanded = canExpand && Boolean(expandedGroups[groupKey]);
@@ -962,27 +1013,27 @@ function alertSignalLabel(alert: AlertEvent) {
 
 function alertMetricRows(alert: AlertEvent): AlertDetailRow[] {
   const detail = alert.detail ?? {};
-  if (alert.strategy_id === "kdj") {
+  if (technicalKind(alert.strategy_id) === "kdj") {
     return [
       { label: "K", value: formatIndicatorValue(detail.K), emphasis: true },
       { label: "D", value: formatIndicatorValue(detail.D), emphasis: true },
       { label: "J", value: formatIndicatorValue(detail.J), emphasis: true }
     ];
   }
-  if (alert.strategy_id === "ma") {
+  if (technicalKind(alert.strategy_id) === "ma") {
     return [
       { label: "快线 MA", value: formatIndicatorValue(detail.fast_ma), emphasis: true },
       { label: "慢线 MA", value: formatIndicatorValue(detail.slow_ma), emphasis: true }
     ];
   }
-  if (alert.strategy_id === "boll") {
+  if (technicalKind(alert.strategy_id) === "boll") {
     return [
       { label: "BOLL 上轨", value: formatIndicatorValue(detail.upper), emphasis: true },
       { label: "BOLL 中轨", value: formatIndicatorValue(detail.middle), emphasis: true },
       { label: "BOLL 下轨", value: formatIndicatorValue(detail.lower), emphasis: true }
     ];
   }
-  if (alert.strategy_id === "boll_ma_cross") {
+  if (technicalKind(alert.strategy_id) === "boll_ma_cross") {
     const bollPeriod = positiveInt(detail.boll_period, 20);
     const maPeriod = positiveInt(detail.ma_period, 99);
     return [
@@ -996,13 +1047,13 @@ function alertMetricRows(alert: AlertEvent): AlertDetailRow[] {
 function formatIndicatorValue(value: unknown) {
   const num = Number(value);
   if (!Number.isFinite(num)) return "--";
-  return num.toLocaleString("zh-CN", { maximumFractionDigits: 4, minimumFractionDigits: 4, useGrouping: false });
+  return formatPrice(num);
 }
 
 function formatClosePrice(value: unknown) {
   const num = Number(value);
   if (!Number.isFinite(num)) return "--";
-  const digits = Math.abs(num) >= 100 ? 2 : 4;
+  const digits = Math.abs(num) >= 100 ? 2 : Math.abs(num) < 1 ? 8 : 4;
   return num.toLocaleString("zh-CN", { maximumFractionDigits: digits, minimumFractionDigits: digits, useGrouping: false });
 }
 
@@ -2883,7 +2934,10 @@ function AdminContent({
               updateArray(modules, setModules, chartModuleIndex, { config: { ...chartModule.config, data_source } });
             }}
           />
-          <span className="hint">这里控制首页五币 K 线墙的数据源；技术策略的数据源在各自策略卡里单独配置。</span>
+          {modules.map((item, index) => item.id === "altcoin_charts" ? <SelectField key={item.id}
+            label="山寨币 K 线" value={String(item.config.data_source ?? "binance_then_okx")} options={DATA_SOURCE_OPTIONS}
+            onChange={(data_source) => updateArray(modules, setModules, index, { config: { ...item.config, data_source } })} /> : null)}
+          <span className="hint">这里分别控制两组 K 线的数据源；技术策略的数据源在各自策略卡里单独配置。</span>
         </div>
       </Panel>
 
@@ -2906,7 +2960,7 @@ function AdminContent({
                 {group.technicalMatrix && (
                   <TechnicalNotificationMatrix
                     strategies={groupStrategies}
-                    symbols={symbols}
+                    symbols={symbols.filter((symbol) => (symbol.market_group === "altcoin") === group.ids[0].startsWith("altcoin_"))}
                     notifiers={notifiers}
                     onChange={(index, next) => {
                       dirtyStrategyIdsRef.current.add(next.id);
@@ -3327,7 +3381,7 @@ function TechnicalNotificationMatrix({
   return (
     <div className="technical-notification-matrix">
       <div className="technical-notification-matrix__tabs" role="tablist" aria-label="技术指标推送矩阵">
-        {TECHNICAL_NOTIFICATION_TABS.filter((tab) => strategies.some(({ strategy: item }) => item.id === tab.id)).map((tab) => (
+        {TECHNICAL_NOTIFICATION_TABS.map((tab) => ({ ...tab, id: strategies[0]?.strategy.id.startsWith("altcoin_") ? `altcoin_${tab.id}` : tab.id })).filter((tab) => strategies.some(({ strategy: item }) => item.id === tab.id)).map((tab) => (
           <button
             type="button"
             role="tab"
@@ -3470,7 +3524,7 @@ function StrategyEditor({
         <Switch checked={strategy.enabled} onChange={(enabled) => onChange({ ...strategy, enabled })} />
       </div>
       <div className="form-grid">
-        {strategy.id === "kdj" && (
+        {technicalKind(strategy.id) === "kdj" && (
           <>
             <NumberField label="N 周期" value={config.period} onChange={(period) => setConfig({ period })} />
             <NumberField label="K 平滑" value={config.k_smoothing} onChange={(k_smoothing) => setConfig({ k_smoothing })} />
@@ -3479,7 +3533,7 @@ function StrategyEditor({
             <Switch checked={Boolean(config.alert_on_live_candle)} onChange={(alert_on_live_candle) => setConfig({ alert_on_live_candle })} label="实时 K 线" />
           </>
         )}
-        {strategy.id === "ma" && (
+        {technicalKind(strategy.id) === "ma" && (
           <>
             <NumberField label="快线" value={config.fast_period} onChange={(fast_period) => setConfig({ fast_period })} />
             <NumberField label="慢线" value={config.slow_period} onChange={(slow_period) => setConfig({ slow_period })} />
@@ -3487,7 +3541,7 @@ function StrategyEditor({
             <Switch checked={Boolean(config.alert_on_live_candle)} onChange={(alert_on_live_candle) => setConfig({ alert_on_live_candle })} label="实时 K 线" />
           </>
         )}
-        {strategy.id === "boll" && (
+        {technicalKind(strategy.id) === "boll" && (
           <>
             <NumberField label="长度" value={config.period} onChange={(period) => setConfig({ period })} />
             <NumberField label="标准差倍数" value={config.stddev} step="0.1" onChange={(stddev) => setConfig({ stddev })} />
@@ -3496,7 +3550,7 @@ function StrategyEditor({
             <span className="hint">默认按闭合 K 线判断；开启实时 K 线后使用当前未闭合 K 线。</span>
           </>
         )}
-        {strategy.id === "boll_ma_cross" && (
+        {technicalKind(strategy.id) === "boll_ma_cross" && (
           <>
             <NumberField label="BOLL 长度" value={config.boll_period ?? 20} onChange={(boll_period) => setConfig({ boll_period })} />
             <NumberField label="MA 周期" value={config.ma_period ?? 99} onChange={(ma_period) => setConfig({ ma_period })} />

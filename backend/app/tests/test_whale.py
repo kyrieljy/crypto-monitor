@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
+from email.utils import format_datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -237,7 +238,7 @@ def test_ibit_news_feed_candidates_extract_txid_addresses_and_amounts(monkeypatc
       <title>贝莱德 IBIT 地址向 Coinbase 存入 4,917 枚 BTC</title>
       <link>https://example.com/news/ibit</link>
       <guid>ibit-news-1</guid>
-      <pubDate>Mon, 06 Jul 2026 06:00:00 GMT</pubDate>
+          <pubDate>{format_datetime(datetime.now(timezone.utc))}</pubDate>
       <description>据 OnchainLens 监测，BlackRock IBIT 相关交易 txid {txid}，价值约 3.01 亿美元，地址 {source_address}</description>
     </item></channel></rss>"""
     provider = BlackRockFreeProvider()
@@ -279,7 +280,7 @@ def test_ibit_news_feed_extracts_eth_amounts_and_evm_addresses(monkeypatch) -> N
       <title>BlackRock associated wallet moved 2,700 BTC and 52,956 ETH to Coinbase</title>
       <link>https://example.com/news/blackrock-eth</link>
       <guid>blackrock-eth-news-1</guid>
-      <pubDate>Mon, 06 Jul 2026 06:00:00 GMT</pubDate>
+          <pubDate>{format_datetime(datetime.now(timezone.utc))}</pubDate>
       <description>OnchainLens reported the BlackRock related address {evm_address} transferred 52,956 ETH to Coinbase.</description>
     </item></channel></rss>"""
     provider = BlackRockFreeProvider()

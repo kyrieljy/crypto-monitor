@@ -2,6 +2,7 @@ export type ThemeMode = "dark" | "light";
 
 export interface SymbolItem {
   symbol: string;
+  market_group: "main" | "altcoin";
   display_name: string;
   enabled: boolean;
   sort_order: number;

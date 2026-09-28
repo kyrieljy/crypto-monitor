@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from html import unescape
 from typing import Any
 
-from ..core.technical_notifications import TECHNICAL_STRATEGY_IDS, technical_notification_enabled
+from ..core.technical_notifications import TECHNICAL_STRATEGY_IDS, technical_notification_enabled, technical_kind, technical_market_group
 from .notifiers import NotificationService
 from .store import Store
 
@@ -35,7 +35,9 @@ def _format_cst(value: Any) -> str:
 
 def _format_number(value: Any, digits: int = 4) -> str:
     try:
-        return f"{float(value):.{digits}f}"
+        number = float(value)
+        precision = max(digits, 8) if 0 < abs(number) < 1 else digits
+        return f"{number:.{precision}f}"
     except Exception:  # noqa: BLE001
         return "--"
 
@@ -159,7 +161,7 @@ def _first_media_url(metadata: dict[str, Any]) -> str:
 
 
 def format_alert_notification(row: Any, strategy_config: dict[str, Any] | None = None) -> str:
-    strategy_id = str(row["strategy_id"])
+    strategy_id = technical_kind(str(row["strategy_id"]))
     detail = _detail(row)
     config = strategy_config or {}
     common = [
@@ -370,7 +372,7 @@ class NotificationWorker:
                         strategy.config,
                         row["symbol"],
                         row["interval"],
-                        self.store.enabled_symbols(),
+                        self.store.enabled_symbols(technical_market_group(row["strategy_id"])),
                     )
                 ):
                     self.store.mark_alert_notification(int(row["id"]), ok=True, error=None)

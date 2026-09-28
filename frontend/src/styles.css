@@ -498,6 +498,14 @@ select:focus {
   min-width: 0;
 }
 
+.altcoin-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .coin-wall {
   display: grid;
   grid-template-columns: repeat(5, minmax(0, 1fr));
@@ -3449,6 +3457,27 @@ select:focus {
 }
 
 @media (max-width: 820px) {
+  .dashboard-fixed-module--altcoin_charts .panel__head {
+    height: auto;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 10px 12px;
+  }
+
+  .dashboard-fixed-module--altcoin_charts .panel__title {
+    flex-basis: 100%;
+  }
+
+  .altcoin-actions {
+    width: 100%;
+    justify-content: flex-start;
+  }
+
+  .altcoin-actions .muted {
+    flex: 1;
+    min-width: 0;
+  }
+
   body {
     min-width: 0;
   }

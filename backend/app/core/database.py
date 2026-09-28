@@ -11,6 +11,7 @@ from .time import utc_now_iso
 
 
 DEFAULT_SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "ZECUSDT"]
+ALTCOIN_SYMBOLS = ["TAOUSDT", "UNIUSDT", "CRCLUSDT", "PENGUUSDT", "ASTERUSDT", "币安人生USDT", "DOGEUSDT", "XRPUSDT"]
 DEFAULT_WHITEHOUSE_URL = "https://www.whitehouse.gov/remarks/"
 LEGACY_WHITEHOUSE_GALLERY_URL = "https://www.whitehouse.gov/gallery/"
 DEFAULT_WHITEHOUSE_INCLUDE_KEYWORDS = [
@@ -254,6 +255,9 @@ class Database:
             self.conn.commit()
 
     def _migrate_schema_columns(self) -> None:
+        symbol_columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(symbols)")}
+        if "market_group" not in symbol_columns:
+            self.conn.execute("ALTER TABLE symbols ADD COLUMN market_group TEXT NOT NULL DEFAULT 'main'")
         notifier_columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(notifier_targets)").fetchall()}
         if "config_json" not in notifier_columns:
             self.conn.execute("ALTER TABLE notifier_targets ADD COLUMN config_json TEXT NOT NULL DEFAULT '{}'")
@@ -555,8 +559,10 @@ class Database:
             )
             self.execute("UPDATE strategy_configs SET name = ?, type = ? WHERE id = ?", (name, kind, strategy_id))
         self._migrate_strategy_config_defaults(now)
+        self._seed_altcoin_strategies(now)
 
         modules = [
+            ("altcoin_charts", "山寨币行情策略监控", 1, 1, {"data_source": "binance_then_okx"}),
             ("charts", "行情与策略监控", 1, 1, {"minW": 12, "minH": 16, "data_source": "okx_then_binance"}),
             ("trump_social", "特朗普社媒监控", 1, 1, {}),
             ("whitehouse", "白宫发言新闻", 1, 1, {}),
@@ -616,6 +622,12 @@ class Database:
                 """,
             )
         self._remove_obsolete_dashboard_modules({"kdj", "ma", "boll", "btc_addresses"})
+        for row in self.query("SELECT id, layout_json FROM dashboard_layouts"):
+            saved_layout = json.loads(row["layout_json"])
+            if not any(item.get("i") == "altcoin_charts" for item in saved_layout):
+                insertion = next((index + 1 for index, item in enumerate(saved_layout) if item.get("i") == "charts"), 0)
+                saved_layout.insert(insertion, {"i": "altcoin_charts", "x": 0, "y": 16, "w": 12, "h": 16})
+                self.execute("UPDATE dashboard_layouts SET layout_json = ? WHERE id = ?", (json.dumps(saved_layout), row["id"]))
 
         default_secret = encrypt_json({"webhook_url": "", "bot_token": "", "chat_id": ""}, self.secret_key)
         self.execute(
@@ -688,6 +700,26 @@ class Database:
                 now,
             ),
         )
+
+    def _seed_altcoin_strategies(self, now: str) -> None:
+        from .technical_notifications import BASE_TECHNICAL_STRATEGY_IDS
+
+        if self.query_one("SELECT 1 FROM app_state WHERE state_key = 'altcoin_symbols_v1'") is None:
+            for index, symbol in enumerate(ALTCOIN_SYMBOLS):
+                self.execute(
+                    "INSERT OR IGNORE INTO symbols (symbol, display_name, enabled, sort_order, market_group) VALUES (?, ?, 1, ?, 'altcoin')",
+                    (symbol, symbol.removesuffix("USDT") + "/USDT", len(DEFAULT_SYMBOLS) + index),
+                )
+                self.execute("UPDATE symbols SET market_group = 'altcoin' WHERE symbol = ?", (symbol,))
+            self.execute("INSERT INTO app_state (state_key, state_value) VALUES ('altcoin_symbols_v1', '1')")
+        for kind in BASE_TECHNICAL_STRATEGY_IDS:
+            original = self.query_one("SELECT * FROM strategy_configs WHERE id = ?", (kind,))
+            config = json.loads(original["config_json"])
+            config.update(data_source="binance_then_okx", notify_intervals_by_symbol={}, symbols=ALTCOIN_SYMBOLS, notify_symbols=[])
+            self.execute(
+                "INSERT OR IGNORE INTO strategy_configs (id, name, type, enabled, config_json, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (f"altcoin_{kind}", original["name"], original["type"], original["enabled"], json.dumps(config, ensure_ascii=False), now),
+            )
 
     def _migrate_strategy_config_defaults(self, now: str) -> None:
         from .technical_notifications import notification_matrix

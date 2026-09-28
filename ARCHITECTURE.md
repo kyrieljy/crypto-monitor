@@ -1,5 +1,14 @@
 # Architecture
 
+## 2026-09-28：山寨币监控扩展
+
+- symbols 增加 market_group（main/altcoin），API SymbolItem 同步暴露；历史记录默认 main，新增八标的由一次性迁移归入 altcoin。
+- 新增 altcoin_kdj、altcoin_ma、altcoin_boll、altcoin_boll_ma_cross，复用原算法和策略 API，配置及通知绑定独立。
+- TechnicalStrategyRunner 按策略所属组过滤启用币种；完整策略 ID 用于告警及去重，指标类型用于模板。发送前再次检查组、启用状态和最新推送矩阵。
+- 每轮以币种、周期、根数、来源偏好缓存 K 线结果或失败，轮询结束清空。前台快照分别读取两组最近 500 条告警。
+- altcoin_charts 为固定位置的独立面板，旧后端布局补入一次，前端保持其他模块本地布局；图表接口按币种组选择 charts/altcoin_charts 的来源。
+- 山寨币本地偏好键：altcoinCollapsed、altcoinChartInterval、altcoinStrategyIntervals。折叠卸载图表，不影响后台 worker。
+
 更新日期：2026-07-15
 
 ## 总览
