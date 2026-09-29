@@ -61,10 +61,13 @@ const COLLAPSED_ALERT_GROUP_HEIGHT = 184;
 
 const INTERVAL_OPTIONS = ["1m", "5m", "15m", "30m", "1h", "4h", "1d"];
 const DASHBOARD_INTERVAL_OPTIONS = [
-  { value: "4h", label: "4小时" },
-  { value: "1h", label: "1小时" },
+  { value: "1m", label: "1分钟" },
+  { value: "5m", label: "5分钟" },
   { value: "15m", label: "15分钟" },
-  { value: "5m", label: "5分钟" }
+  { value: "30m", label: "30分钟" },
+  { value: "1h", label: "1小时" },
+  { value: "4h", label: "4小时" },
+  { value: "1d", label: "1天" }
 ];
 const TRUTH_SOURCE_OPTIONS = [
   { value: "rss", label: "RSS 归档" },
@@ -4085,14 +4088,10 @@ function SelectField({ label, value, options, onChange }: { label: string; value
 }
 
 function IntervalSegmented({ value, onChange }: { value: string; onChange: (value: string) => void }) {
-  const activeIndex = Math.max(0, DASHBOARD_INTERVAL_OPTIONS.findIndex((option) => option.value === value));
-  const thumbTransform = `translateX(calc(${activeIndex * 100}% + ${activeIndex * 4}px))`;
-
   return (
-    <div className="interval-segmented">
-      <span className="interval-segmented__thumb" style={{ transform: thumbTransform }} />
+    <div className="interval-segmented" role="group" aria-label="K 线周期">
       {DASHBOARD_INTERVAL_OPTIONS.map((option) => (
-        <button key={option.value} type="button" className={value === option.value ? "active" : ""} onClick={() => onChange(option.value)}>
+        <button key={option.value} type="button" aria-pressed={value === option.value} className={value === option.value ? "active" : ""} onClick={() => onChange(option.value)}>
           {option.label}
         </button>
       ))}

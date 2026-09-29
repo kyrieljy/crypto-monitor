@@ -70,7 +70,7 @@ def test_boll_ma_cross_keeps_dashboard_alerts_but_filters_notifications(tmp_path
     runner._run_boll_ma_cross()
 
     alerts = store.list_alerts(20)
-    assert len(alerts) == 8
+    assert len(alerts) == 14
     assert {alert.symbol for alert in alerts} == {"BTCUSDT", "ETHUSDT"}
     assert all(alert.signal == "BOLL_MIDDLE_CROSS_ABOVE_MA" for alert in alerts)
     assert all("MA3" in alert.message for alert in alerts)
@@ -102,11 +102,11 @@ def test_empty_notification_matrix_suppresses_all_notifications_without_hiding_a
 
     runner._run_boll_ma_cross()
 
-    assert len(store.list_alerts(20)) == 8
+    assert len(store.list_alerts(20)) == 14
     assert store.list_pending_alert_notifications() == []
 
 
-def test_notification_matrix_is_exact_per_symbol_and_fetches_extra_intervals_only_where_selected(tmp_path: Path) -> None:
+def test_notification_matrix_is_exact_while_all_dashboard_intervals_are_monitored(tmp_path: Path) -> None:
     store = Store(Database(tmp_path / "test.db", "secret"))
     enable_only(store, "BTCUSDT", "ETHUSDT")
     strategy = store.get_strategy("boll_ma_cross")
@@ -132,8 +132,9 @@ def test_notification_matrix_is_exact_per_symbol_and_fetches_extra_intervals_onl
     pending = store.list_pending_alert_notifications()
     assert {(row["symbol"], row["interval"]) for row in pending} == {("BTCUSDT", "30m"), ("ETHUSDT", "1h")}
     assert ("BTCUSDT", "30m") in market_router.calls
-    assert ("ETHUSDT", "30m") not in market_router.calls
-    assert len(store.list_alerts(20)) == 9
+    assert ("ETHUSDT", "30m") in market_router.calls
+    assert {interval for symbol, interval in market_router.calls} == {"1m", "5m", "15m", "30m", "1h", "4h", "1d"}
+    assert len(store.list_alerts(20)) == 14
 
 
 def test_global_enabled_symbol_is_monitored_even_when_missing_from_legacy_symbols_config(tmp_path: Path) -> None:

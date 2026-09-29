@@ -4,7 +4,7 @@ import asyncio
 import logging
 from typing import Any
 
-from ..core.technical_notifications import TECHNICAL_STRATEGY_IDS, notification_matrix, technical_kind, technical_market_group
+from ..core.technical_notifications import TECHNICAL_NOTIFICATION_INTERVALS, TECHNICAL_STRATEGY_IDS, notification_matrix, technical_kind, technical_market_group
 from .events import EventBus
 from .indicators import (
     calculate_boll,
@@ -37,7 +37,7 @@ STRATEGY_ALERT_TITLES = {
     "boll_ma_cross": "BOLL中轨/MA",
 }
 
-DASHBOARD_MONITOR_INTERVALS = ("4h", "1h", "15m", "5m")
+DASHBOARD_MONITOR_INTERVALS = TECHNICAL_NOTIFICATION_INTERVALS
 
 
 class TechnicalStrategyRunner:

@@ -95,10 +95,11 @@ def test_all_indicators_group_isolation_dedupe_and_notification_recheck(tmp_path
     runner = TechnicalStrategyRunner(store, Market(), EventBus())
     runner.run_once()
     alerts = store.list_alerts(100)
-    assert len(alerts) == 8
+    assert len(alerts) == 14
+    assert {item.interval for item in alerts} == {"1m", "5m", "15m", "30m", "1h", "4h", "1d"}
     assert {(item.strategy_id, item.symbol) for item in alerts} == {(kind, "BTCUSDT"), ("altcoin_" + kind, "PENGUUSDT")}
     runner.run_once()
-    assert len(store.list_alerts(100)) == 8
+    assert len(store.list_alerts(100)) == 14
     assert len(store.list_pending_alert_notifications()) == 2
     sid = "altcoin_" + kind
     strategy = store.get_strategy(sid)
@@ -121,10 +122,10 @@ def test_candles_cached_only_within_poll_and_failure_isolated(tmp_path):
     market = Market(fail_symbol="BTCUSDT")
     runner = TechnicalStrategyRunner(store, market, EventBus())
     runner.run_once()
-    assert len(market.calls) == 8
+    assert len(market.calls) == 14
     assert any(call[0] == "PENGUUSDT" for call in market.calls)
     runner.run_once()
-    assert len(market.calls) == 16
+    assert len(market.calls) == 28
     db.close()
 
 

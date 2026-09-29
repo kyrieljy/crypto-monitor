@@ -1,5 +1,9 @@
 # Architecture
 
+## 2026-09-29：监控与展示周期对齐
+
+前台两组共用七档周期控件（1m/5m/15m/30m/1h/4h/1d），窄屏按钮可换行。TechnicalStrategyRunner 固定看板周期复用 TECHNICAL_NOTIFICATION_INTERVALS；所有启用币种均生成七档前台信号，是否推送仍由 notify_intervals_by_symbol 决定。
+
 ## 2026-09-28：山寨币监控扩展
 
 - symbols 增加 market_group（main/altcoin），API SymbolItem 同步暴露；历史记录默认 main，新增八标的由一次性迁移归入 altcoin。
