@@ -373,11 +373,12 @@ class NotificationWorker:
                         row["symbol"],
                         row["interval"],
                         self.store.enabled_symbols(technical_market_group(row["strategy_id"])),
+                        row["signal"],
                     )
                 ):
                     self.store.mark_alert_notification(int(row["id"]), ok=True, error=None)
                     LOGGER.info(
-                        "技术告警通知已按最新推送矩阵跳过 id=%s strategy=%s symbol=%s interval=%s",
+                        "技术告警通知已按最新推送配置跳过 id=%s strategy=%s symbol=%s interval=%s",
                         row["id"],
                         row["strategy_id"],
                         row["symbol"],

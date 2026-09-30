@@ -106,7 +106,21 @@ def technical_notification_enabled(
     symbol: str,
     interval: str,
     enabled_symbols: Iterable[str],
+    signal: str | None = None,
 ) -> bool:
     if strategy_id not in TECHNICAL_STRATEGY_IDS:
         return True
-    return interval in notification_intervals_for_symbol(strategy_id, config, symbol, enabled_symbols)
+    return (
+        interval in notification_intervals_for_symbol(strategy_id, config, symbol, enabled_symbols)
+        and cross_direction_notification_enabled(strategy_id, config, signal)
+    )
+
+
+def cross_direction_notification_enabled(strategy_id: str, config: dict[str, Any], signal: str | None) -> bool:
+    if technical_kind(strategy_id) != "boll_ma_cross":
+        return True
+    if signal == "BOLL_MIDDLE_CROSS_ABOVE_MA":
+        return config.get("notify_cross_above", True) is not False
+    if signal == "BOLL_MIDDLE_CROSS_BELOW_MA":
+        return config.get("notify_cross_below", True) is not False
+    return True

@@ -6,6 +6,7 @@ from typing import Any
 import pytest
 
 from backend.app.core.database import Database
+from backend.app.core.technical_notifications import cross_direction_notification_enabled
 from backend.app.services.events import EventBus
 from backend.app.services.market_data import Candle
 from backend.app.services.market_data import OkxSwapDataSource
@@ -15,14 +16,14 @@ from backend.app.services.strategies import TechnicalStrategyRunner
 
 
 class FakeMarketRouter:
-    def __init__(self, *, live_candle: bool) -> None:
+    def __init__(self, *, live_candle: bool, closed_prices: list[float] | None = None) -> None:
         self.live_candle = live_candle
+        self.closed_prices = closed_prices or [3.0, 1.0, 1.0, 3.0]
         self.calls: list[tuple[str, str]] = []
 
     def fetch_klines(self, symbol: str, interval: str, limit: int, preference: str):
         self.calls.append((symbol, interval))
-        closed_prices = [3.0, 1.0, 1.0, 3.0]
-        prices = closed_prices if self.live_candle else [*closed_prices, 0.5]
+        prices = self.closed_prices if self.live_candle else [*self.closed_prices, 0.5]
         candles = [
             Candle(
                 symbol=symbol,
@@ -43,6 +44,12 @@ def enable_only(store: Store, *symbols: str) -> None:
     store.db.execute("UPDATE symbols SET enabled = 0")
     for symbol in symbols:
         store.db.execute("UPDATE symbols SET enabled = 1 WHERE symbol = ?", (symbol,))
+
+
+@pytest.mark.parametrize("strategy_id", ["boll_ma_cross", "altcoin_boll_ma_cross"])
+@pytest.mark.parametrize("signal", ["BOLL_MIDDLE_CROSS_ABOVE_MA", "BOLL_MIDDLE_CROSS_BELOW_MA"])
+def test_boll_ma_existing_config_without_direction_keys_keeps_notifications(strategy_id: str, signal: str) -> None:
+    assert cross_direction_notification_enabled(strategy_id, {}, signal)
 
 
 @pytest.mark.parametrize("alert_on_live_candle", [False, True])
@@ -164,6 +171,55 @@ def test_global_enabled_symbol_is_monitored_even_when_missing_from_legacy_symbol
     assert [(row["symbol"], row["interval"]) for row in pending] == [("ETHUSDT", "1h")]
 
 
+@pytest.mark.parametrize("strategy_id,symbol", [("boll_ma_cross", "BTCUSDT"), ("altcoin_boll_ma_cross", "TAOUSDT")])
+@pytest.mark.parametrize("notify_above,notify_below", [(True, True), (True, False), (False, True), (False, False)])
+@pytest.mark.parametrize(
+    "closed_prices,signal,selected_direction",
+    [
+        ([3.0, 1.0, 1.0, 3.0], "BOLL_MIDDLE_CROSS_ABOVE_MA", "above"),
+        ([1.0, 3.0, 3.0, 1.0], "BOLL_MIDDLE_CROSS_BELOW_MA", "below"),
+    ],
+)
+def test_boll_ma_direction_filters_notifications_but_keeps_alerts(
+    tmp_path: Path,
+    strategy_id: str,
+    symbol: str,
+    notify_above: bool,
+    notify_below: bool,
+    closed_prices: list[float],
+    signal: str,
+    selected_direction: str,
+) -> None:
+    store = Store(Database(tmp_path / "test.db", "secret"))
+    enable_only(store, symbol)
+    strategy = store.get_strategy(strategy_id)
+    assert strategy is not None
+    store.update_strategy(
+        strategy_id,
+        True,
+        {
+            **strategy.config,
+            "notify_intervals_by_symbol": {symbol: ["1h"]},
+            "notify_cross_above": notify_above,
+            "notify_cross_below": notify_below,
+            "boll_period": 2,
+            "ma_period": 3,
+            "alert_on_live_candle": True,
+        },
+        None,
+    )
+
+    runner = TechnicalStrategyRunner(store, FakeMarketRouter(live_candle=True, closed_prices=closed_prices), EventBus())  # type: ignore[arg-type]
+    runner._run_boll_ma_cross(strategy_id)
+
+    alerts = store.list_alerts(20)
+    assert len(alerts) == 7
+    assert all(alert.signal == signal for alert in alerts)
+    direction_enabled = notify_above if selected_direction == "above" else notify_below
+    pending = store.list_pending_alert_notifications()
+    assert [(row["symbol"], row["interval"]) for row in pending] == ([(symbol, "1h")] if direction_enabled else [])
+
+
 class FakeNotificationService:
     def __init__(self) -> None:
         self.messages: list[tuple[str, str]] = []
@@ -196,6 +252,40 @@ def test_notification_worker_skips_technical_event_removed_from_latest_matrix(tm
 
     assert notification_service.messages == []
     assert store.list_pending_alert_notifications() == []
+
+
+@pytest.mark.parametrize(
+    "closed_prices,disabled_key",
+    [
+        ([3.0, 1.0, 1.0, 3.0], "notify_cross_above"),
+        ([1.0, 3.0, 3.0, 1.0], "notify_cross_below"),
+    ],
+)
+def test_notification_worker_skips_direction_disabled_after_alert_was_queued(
+    tmp_path: Path, closed_prices: list[float], disabled_key: str
+) -> None:
+    store = Store(Database(tmp_path / "test.db", "secret"))
+    enable_only(store, "BTCUSDT")
+    strategy = store.get_strategy("boll_ma_cross")
+    assert strategy is not None
+    config = {
+        **strategy.config,
+        "notify_intervals_by_symbol": {"BTCUSDT": ["1h"]},
+        "boll_period": 2,
+        "ma_period": 3,
+        "alert_on_live_candle": True,
+    }
+    store.update_strategy("boll_ma_cross", True, config, None)
+    TechnicalStrategyRunner(store, FakeMarketRouter(live_candle=True, closed_prices=closed_prices), EventBus())._run_boll_ma_cross()  # type: ignore[arg-type]
+    assert len(store.list_pending_alert_notifications()) == 1
+
+    store.update_strategy("boll_ma_cross", True, {**config, disabled_key: False}, None)
+    notification_service = FakeNotificationService()
+    NotificationWorker(store, notification_service).run_once()  # type: ignore[arg-type]
+
+    assert notification_service.messages == []
+    assert store.list_pending_alert_notifications() == []
+    assert len(store.list_alerts(20)) == 7
 
 
 def test_okx_supports_all_matrix_intervals_including_30m() -> None:

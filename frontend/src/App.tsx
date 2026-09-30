@@ -3419,6 +3419,34 @@ function TechnicalNotificationMatrix({
           </button>
         </div>
       </div>
+      {technicalKind(strategy.id) === "boll_ma_cross" && (
+        <fieldset className="technical-notification-matrix__directions">
+          <legend>提醒方向</legend>
+          <label>
+            <input
+              type="checkbox"
+              checked={strategy.config.notify_cross_above !== false}
+              onChange={(event) => onChange(index, {
+                ...strategy,
+                config: { ...strategy.config, notify_cross_above: event.target.checked }
+              })}
+            />
+            上穿提醒
+          </label>
+          <label>
+            <input
+              type="checkbox"
+              checked={strategy.config.notify_cross_below !== false}
+              onChange={(event) => onChange(index, {
+                ...strategy,
+                config: { ...strategy.config, notify_cross_below: event.target.checked }
+              })}
+            />
+            下穿提醒
+          </label>
+          <span className="hint">方向选择仅控制机器人推送，前台告警仍显示上穿和下穿。</span>
+        </fieldset>
+      )}
       <div className="technical-notification-matrix__scroll">
         <table>
           <thead>

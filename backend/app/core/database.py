@@ -413,6 +413,8 @@ class Database:
                     "intervals": ["1h", "4h"],
                     "boll_period": 20,
                     "ma_period": 99,
+                    "notify_cross_above": True,
+                    "notify_cross_below": True,
                     "alert_on_live_candle": False,
                     "candle_limit": 200,
                     "poll_seconds": 10,

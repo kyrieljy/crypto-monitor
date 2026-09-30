@@ -4,7 +4,7 @@ import asyncio
 import logging
 from typing import Any
 
-from ..core.technical_notifications import TECHNICAL_NOTIFICATION_INTERVALS, TECHNICAL_STRATEGY_IDS, notification_matrix, technical_kind, technical_market_group
+from ..core.technical_notifications import TECHNICAL_NOTIFICATION_INTERVALS, TECHNICAL_STRATEGY_IDS, cross_direction_notification_enabled, notification_matrix, technical_kind, technical_market_group
 from .events import EventBus
 from .indicators import (
     calculate_boll,
@@ -288,7 +288,7 @@ class TechnicalStrategyRunner:
                             close_price=target[-1].close_price,
                             source=source,
                             source_role=source_role,
-                            notify=interval in notify_interval_set,
+                            notify=interval in notify_interval_set and cross_direction_notification_enabled(strategy_id, config, signal),
                             detail={
                                 "boll_middle": current_middle,
                                 "ma": current_ma,

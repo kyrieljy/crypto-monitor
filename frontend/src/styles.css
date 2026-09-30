@@ -1759,6 +1759,28 @@ select:focus {
   color: var(--success-text);
 }
 
+.technical-notification-matrix__directions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px 20px;
+  margin: 0;
+  padding: 10px 14px;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.technical-notification-matrix__directions legend {
+  font-weight: 600;
+}
+
+.technical-notification-matrix__directions label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+
 .technical-notification-matrix__scroll {
   max-width: 100%;
   overflow-x: auto;
